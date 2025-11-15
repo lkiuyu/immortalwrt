@@ -188,6 +188,16 @@
 	};
 };
 
+&usb0 {
+	status = "okay";
+};
+
+&usb1 {
+	status = "okay";
+	mediatek,u3p-dis-msk = <0x1>;
+	phys = <&usb1_phy PHY_TYPE_USB2>;
+};
+
 &i2c0 {
 	status = "okay";
 };
