@@ -112,6 +112,7 @@ case "$board" in
 		[ "$PHYNBR" = "1" ] && macaddr_setbit_la $addr > /sys${DEVPATH}/macaddress
 		;;
 	iptime,ax3000m|\
+	iptime,ax3000se|\
 	iptime,ax3000sm)
 		addr=$(mtd_get_mac_binary "Factory" 0x4)
 		[ "$PHYNBR" = "1" ] && macaddr_setbit_la $(macaddr_unsetbit $(macaddr_unsetbit $(macaddr_unsetbit $(macaddr_setbit $addr 26) 25) 27) 28) > \
@@ -147,6 +148,7 @@ case "$board" in
 		;;
 	mercusys,mr90x-v1|\
 	tplink,archer-ax80-v1|\
+	tplink,be450|\
 	tplink,re6000xd)
 		addr=$(get_mac_binary "/tmp/tp_data/default-mac" 0)
 		[ "$PHYNBR" = "0" ] && echo "$addr" > /sys${DEVPATH}/macaddress

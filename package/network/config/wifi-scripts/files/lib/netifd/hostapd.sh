@@ -126,6 +126,7 @@ hostapd_common_add_device_config() {
 	config_add_int cell_density
 	config_add_int rts_threshold
 	config_add_int rssi_reject_assoc_rssi
+	config_add_int rssi_reject_assoc_timeout
 	config_add_int rssi_ignore_probe_request
 	config_add_int maxassoc
 	config_add_int reg_power_type
@@ -149,8 +150,8 @@ hostapd_prepare_device_config() {
 
 	json_get_vars country country3 country_ie beacon_int:100 doth require_mode legacy_rates \
 		acs_chan_bias local_pwr_constraint spectrum_mgmt_required airtime_mode cell_density \
-		rts_threshold beacon_rate rssi_reject_assoc_rssi rssi_ignore_probe_request maxassoc \
-		mbssid:0 band reg_power_type stationary_ap vendor_vht
+		rts_threshold beacon_rate rssi_reject_assoc_rssi rssi_reject_assoc_timeout rssi_ignore_probe_request \
+		maxassoc mbssid:0 band reg_power_type stationary_ap vendor_vht
 
 	hostapd_set_log_options base_cfg
 
@@ -244,6 +245,7 @@ hostapd_prepare_device_config() {
 	done
 
 	[ -n "$rssi_reject_assoc_rssi" ] && append base_cfg "rssi_reject_assoc_rssi=$rssi_reject_assoc_rssi" "$N"
+	[ -n "$rssi_reject_assoc_timeout" ] && append base_cfg "rssi_reject_assoc_timeout=$rssi_reject_assoc_timeout" "$N"
 	[ -n "$rssi_ignore_probe_request" ] && append base_cfg "rssi_ignore_probe_request=$rssi_ignore_probe_request" "$N"
 	[ -n "$beacon_rate" ] && append base_cfg "beacon_rate=$beacon_rate" "$N"
 	[ -n "$rlist" ] && append base_cfg "supported_rates=$rlist" "$N"
@@ -324,7 +326,7 @@ hostapd_common_add_bss_config() {
 
 	config_add_string 'key1:wepkey' 'key2:wepkey' 'key3:wepkey' 'key4:wepkey' 'password:wpakey'
 
-	config_add_string wpa_psk_file
+	config_add_string wpa_psk_file sae_password_file
 
 	config_add_int multi_ap
 
@@ -362,7 +364,7 @@ hostapd_common_add_bss_config() {
 	config_add_array supported_rates
 
 	config_add_boolean sae_require_mfp
-	config_add_int sae_pwe
+	config_add_int sae_pwe sae_track_password
 
 	config_add_string 'owe_transition_bssid:macaddr' 'owe_transition_ssid:string'
 	config_add_string owe_transition_ifname
@@ -385,7 +387,7 @@ hostapd_common_add_bss_config() {
 	config_add_array airtime_sta_weight
 	config_add_int airtime_bss_weight airtime_bss_limit
 
-	config_add_boolean multicast_to_unicast multicast_to_unicast_all proxy_arp per_sta_vif
+	config_add_boolean multicast_to_unicast multicast_to_unicast_all proxy_arp per_sta_vif na_mcast_to_ucast
 
 	config_add_array hostapd_bss_options
 	config_add_boolean default_disabled
@@ -551,10 +553,10 @@ hostapd_set_bss_options() {
 		macfilter ssid utf8_ssid uapsd hidden short_preamble rsn_preauth \
 		iapp_interface eapol_version dynamic_vlan ieee80211w nasid \
 		acct_secret acct_port acct_interval \
-		bss_load_update_period chan_util_avg_period sae_require_mfp sae_pwe \
+		bss_load_update_period chan_util_avg_period sae_require_mfp sae_pwe sae_track_password \
 		multi_ap multi_ap_backhaul_ssid multi_ap_backhaul_key skip_inactivity_poll \
 		ppsk airtime_bss_weight airtime_bss_limit airtime_sta_weight \
-		multicast_to_unicast_all proxy_arp per_sta_vif \
+		multicast_to_unicast_all proxy_arp per_sta_vif na_mcast_to_ucast \
 		eap_server eap_user_file ca_cert server_cert private_key private_key_passwd server_id radius_server_clients radius_server_auth_port \
 		vendor_elements fils ocv apup rsn_override
 
@@ -647,6 +649,7 @@ hostapd_set_bss_options() {
 	esac
 	[ -n "$sae_require_mfp" ] && append bss_conf "sae_require_mfp=$sae_require_mfp" "$N"
 	[ -n "$sae_pwe" ] && append bss_conf "sae_pwe=$sae_pwe" "$N"
+	[ -n "$sae_track_password" ] && append bss_conf "sae_track_password=$sae_track_password" "$N"
 
 	local vlan_possible=""
 
@@ -919,7 +922,7 @@ hostapd_set_bss_options() {
 
 			set_default mobility_domain "$(echo "$ssid" | md5sum | head -c 4)"
 			set_default ft_over_ds 0
-			set_default reassociation_deadline 1000
+			set_default reassociation_deadline 20000
 
 			case "$auth_type" in
 				psk)
@@ -1159,8 +1162,12 @@ hostapd_set_bss_options() {
 		append bss_conf "multicast_to_unicast=$multicast_to_unicast_all" "$N"
 	fi
 	set_default proxy_arp 0
+	set_default na_mcast_to_ucast "$proxy_arp"
 	if [ "$proxy_arp" -gt 0 ]; then
 		append bss_conf "proxy_arp=$proxy_arp" "$N"
+	fi
+	if [ "$na_mcast_to_ucast" -gt 0 ]; then
+		append bss_conf "na_mcast_to_ucast=$na_mcast_to_ucast" "$N"
 	fi
 
 	set_default per_sta_vif 0

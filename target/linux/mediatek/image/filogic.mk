@@ -8,6 +8,15 @@ define Image/Prepare
 	echo -ne '\xde\xad\xc0\xde' > $(KDIR)/ubi_mark
 endef
 
+define Build/fit-with-netgear-top-level-rootfs-node
+	$(call Build/fit-its,$(1))
+	$(TOPDIR)/scripts/gen_netgear_rootfs_node.sh $(KERNEL_BUILD_DIR)/root.squashfs > $@.rootfs
+	awk '/configurations/ { system("cat $@.rootfs") } 1' $@.its > $@.its.tmp
+	@mv -f $@.its.tmp $@.its
+	@rm -f $@.rootfs
+	$(call Build/fit-image,$(1))
+endef
+
 define Build/mt7981-bl2
 	cat $(STAGING_DIR_IMAGE)/mt7981-$1-bl2.img >> $@
 endef
@@ -110,7 +119,7 @@ endef
 
 define Build/zyxel-nwa-fit-filogic
 	$(TOPDIR)/scripts/mkits-zyxel-fit-filogic.sh \
-		$@.its $@ "80 e1 ff ff ff ff ff ff ff ff"
+		$@.its $@ "80 e1 81 e1 ff ff ff ff ff ff"
 	PATH=$(LINUX_DIR)/scripts/dtc:$(PATH) mkimage -f $@.its $@.new
 	@mv $@.new $@
 endef
@@ -408,6 +417,16 @@ define Device/asus_tuf-ax4200
   KERNEL_INITRAMFS := kernel-bin | lzma | \
 	fit lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb with-initrd | pad-to 64k
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+ifeq ($(IB),)
+ifneq ($(CONFIG_TARGET_ROOTFS_INITRAMFS),)
+ifeq ($(CONFIG_TARGET_ROOTFS_INITRAMFS_SEPARATE),)
+  # The default boot command of the bootloader does not load the ramdisk from the FIT image
+  ARTIFACTS := initramfs.trx
+  ARTIFACT/initramfs.trx := append-image-stage initramfs-kernel.bin | \
+	uImage none | asus-trx -v 3 -n $$(DEVICE_MODEL)
+endif
+endif
+endif
 endef
 TARGET_DEVICES += asus_tuf-ax4200
 
@@ -654,9 +673,8 @@ define Device/bananapi_bpi-r4-lite
   DEVICE_DTC_FLAGS := --pad 4096
   DEVICE_DTS_DIR := ../dts
   DEVICE_DTS_LOADADDR := 0x4ff00000
-  DEVICE_PACKAGES := kmod-eeprom-at24 \
-		     kmod-gpio-pca953x kmod-i2c-mux-pca954x kmod-rtc-pcf8563 \
-		     kmod-sfp e2fsprogs mkf2fs
+  DEVICE_PACKAGES := kmod-eeprom-at24 kmod-gpio-pca953x kmod-i2c-mux-pca954x \
+		     kmod-rtc-pcf8563 kmod-sfp kmod-usb3 e2fsprogs mkf2fs mt7987-2p5g-phy-firmware
   BLOCKSIZE := 128k
   PAGESIZE := 2048
   KERNEL_IN_UBI := 1
@@ -909,6 +927,45 @@ define Device/comfast_cf-e393ax
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
 endef
 TARGET_DEVICES += comfast_cf-e393ax
+
+define Device/comfast_cf-wr632ax-common
+  DEVICE_VENDOR := COMFAST
+  DEVICE_MODEL := CF-WR632AX
+  DEVICE_DTS_DIR := ../dts
+  DEVICE_PACKAGES := kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware \
+	kmod-hwmon-pwmfan kmod-usb3 automount
+  UBINIZE_OPTS := -E 5
+  BLOCKSIZE := 128k
+  PAGESIZE := 2048
+  KERNEL_IN_UBI := 1
+endef
+
+define Device/comfast_cf-wr632ax
+  DEVICE_DTS := mt7981b-comfast-cf-wr632ax
+  IMAGE_SIZE := 65536k
+  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+  SUPPORTED_DEVICES += cf-wr632ax
+  $(call Device/comfast_cf-wr632ax-common)
+endef
+TARGET_DEVICES += comfast_cf-wr632ax
+
+define Device/comfast_cf-wr632ax-ubootmod
+  DEVICE_VARIANT := (OpenWrt U-Boot layout)
+  DEVICE_DTS := mt7981b-comfast-cf-wr632ax-ubootmod
+  UBOOTENV_IN_UBI := 1
+  IMAGES := sysupgrade.itb
+  KERNEL_INITRAMFS_SUFFIX := -recovery.itb
+  KERNEL := kernel-bin | gzip
+  KERNEL_INITRAMFS := kernel-bin | lzma | \
+	fit lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb with-initrd | pad-to 64k
+  IMAGE/sysupgrade.itb := append-kernel | \
+	fit gzip $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb external-static-with-rootfs | append-metadata
+  ARTIFACTS := preloader.bin bl31-uboot.fip
+  ARTIFACT/preloader.bin := mt7981-bl2 spim-nand-ddr3
+  ARTIFACT/bl31-uboot.fip := mt7981-bl31-uboot comfast_cf-wr632ax
+  $(call Device/comfast_cf-wr632ax-common)
+endef
+TARGET_DEVICES += comfast_cf-wr632ax-ubootmod
 
 define Device/confiabits_mt7981
   DEVICE_VENDOR := Confiabits
@@ -1437,12 +1494,15 @@ define Device/huasifei_wh3000-pro
 endef
 TARGET_DEVICES += huasifei_wh3000-pro
 
-define Device/imou_lc-hx3001
+define Device/imou_hx21
   DEVICE_VENDOR := Imou
-  DEVICE_MODEL := LC-HX3001
-  DEVICE_DTS := mt7981b-imou-lc-hx3001
+  DEVICE_MODEL := HX21
+  DEVICE_ALT0_VENDOR := Imou
+  DEVICE_ALT0_MODEL := LC-HX3001
+  DEVICE_DTS := mt7981b-imou-hx21
   DEVICE_DTS_DIR := ../dts
   DEVICE_PACKAGES := kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware
+  SUPPORTED_DEVICES += imou,lc-hx3001
   UBINIZE_OPTS := -E 5
   BLOCKSIZE := 128k
   PAGESIZE := 2048
@@ -1457,9 +1517,9 @@ define Device/imou_lc-hx3001
         fit gzip $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb external-static-with-rootfs | append-metadata
   ARTIFACTS := preloader.bin bl31-uboot.fip
   ARTIFACT/preloader.bin := mt7981-bl2 spim-nand-ddr3
-  ARTIFACT/bl31-uboot.fip := mt7981-bl31-uboot imou_lc-hx3001
+  ARTIFACT/bl31-uboot.fip := mt7981-bl31-uboot imou_hx21
 endef
-TARGET_DEVICES += imou_lc-hx3001
+TARGET_DEVICES += imou_hx21
 
 define Device/iptime_ax3000q
   DEVICE_VENDOR := ipTIME
@@ -1479,6 +1539,26 @@ define Device/iptime_ax3000q
   SUPPORTED_DEVICES += mediatek,mt7981-spim-snand-rfb
 endef
 TARGET_DEVICES += iptime_ax3000q
+
+define Device/iptime_ax3000se
+  DEVICE_VENDOR := ipTIME
+  DEVICE_MODEL := AX3000SE
+  DEVICE_DTS := mt7981b-iptime-ax3000se
+  DEVICE_DTS_DIR := ../dts
+  BLOCKSIZE := 128k
+  PAGESIZE := 2048
+  IMAGE_SIZE := 32768k
+  KERNEL := kernel-bin | lzma | fit lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb
+  KERNEL_INITRAMFS := kernel-bin | lzma | \
+	fit lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb with-initrd | pad-to 64k
+  IMAGES := sysupgrade.bin
+  IMAGES := factory.bin sysupgrade.bin
+  IMAGE/factory.bin := sysupgrade-tar | append-metadata | check-size | iptime-crc32 ax3kse
+  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+  DEVICE_PACKAGES := kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware
+  SUPPORTED_DEVICES += mediatek,mt7981-spim-snand-rfb
+endef
+TARGET_DEVICES += iptime_ax3000se
 
 define Device/iptime_ax3000sm
   DEVICE_VENDOR := ipTIME
@@ -1533,7 +1613,8 @@ define Device/iptime_ax7800m-6e
   IMAGES := factory.bin sysupgrade.bin
   IMAGE/factory.bin := sysupgrade-tar | append-metadata | check-size | iptime-crc32 ax7800m
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
-  DEVICE_PACKAGES := kmod-usb3 kmod-mt7915e kmod-mt7916-firmware kmod-mt7986-firmware mt7986-wo-firmware kmod-hwmon-gpiofan
+  DEVICE_PACKAGES := kmod-mt7915e kmod-mt7916-firmware kmod-mt7986-firmware mt7986-wo-firmware kmod-hwmon-gpiofan \
+	kmod-usb3 automount
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
 endef
 TARGET_DEVICES += iptime_ax7800m-6e
@@ -1618,7 +1699,7 @@ define Device/keenetic_kn-3811
   DEVICE_MODEL := KN-3811
   DEVICE_DTS := mt7981b-keenetic-kn-3811
   DEVICE_DTS_DIR := ../dts
-  DEVICE_PACKAGES := kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware kmod-usb3
+  DEVICE_PACKAGES := kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware kmod-usb3 automount
   UBINIZE_OPTS := -E 5
   BLOCKSIZE := 128k
   PAGESIZE := 2048
@@ -1855,7 +1936,7 @@ define Device/mediatek_mt7987a-rfb
   DEVICE_DTS_DIR := ../dts
   DEVICE_DTC_FLAGS := --pad 4096
   DEVICE_DTS_LOADADDR := 0x4ff00000
-  DEVICE_PACKAGES := mt798x-2p5g-phy-firmware-internal kmod-sfp blkid
+  DEVICE_PACKAGES := mt7987-2p5g-phy-firmware kmod-sfp
   KERNEL_LOADADDR := 0x40000000
   KERNEL := kernel-bin | gzip
   KERNEL_INITRAMFS := kernel-bin | lzma | \
@@ -2051,6 +2132,48 @@ define Device/netcore_n60-pro
   ARTIFACT/bl31-uboot.fip := mt7986-bl31-uboot netcore_n60-pro
 endef
 TARGET_DEVICES += netcore_n60-pro
+
+define Device/netgear_eax17
+  DEVICE_VENDOR := NETGEAR
+  DEVICE_MODEL := EAX17
+  DEVICE_ALT0_VENDOR := NETGEAR
+  DEVICE_ALT0_MODEL := EAX11
+  DEVICE_ALT0_VARIANT := v3
+  DEVICE_ALT1_VENDOR := NETGEAR
+  DEVICE_ALT1_MODEL := EAX15
+  DEVICE_ALT1_VARIANT := v3
+  DEVICE_ALT2_VENDOR := NETGEAR
+  DEVICE_ALT2_MODEL := EAX14
+  DEVICE_ALT2_VARIANT := v3
+  DEVICE_ALT3_VENDOR := NETGEAR
+  DEVICE_ALT3_MODEL := EAX12
+  DEVICE_ALT3_VARIANT := v2
+  DEVICE_ALT4_VENDOR := NETGEAR
+  DEVICE_ALT4_MODEL := EAX16
+  DEVICE_ALT5_VENDOR := NETGEAR
+  DEVICE_ALT5_MODEL := EAX19
+  DEVICE_DTS := mt7981b-netgear-eax17
+  DEVICE_DTS_DIR := ../dts
+  SUPPORTED_DEVICES += mediatek,mt7981-spim-snand-rfb
+  UBINIZE_OPTS := -E 5
+  BLOCKSIZE := 128k
+  PAGESIZE := 2048
+  NETGEAR_ENC_MODEL := EAX17
+  NETGEAR_ENC_REGION := US
+  NETGEAR_ENC_HW_ID_LIST := 1010000013120000_NETGEAR
+  NETGEAR_ENC_MODEL_LIST := EAX17;EAX11v3;EAX15v3;EAX14v3;EAX12v2;EAX16;EAX19
+  DEVICE_PACKAGES := kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware
+  KERNEL = kernel-bin | lzma | \
+	fit-with-netgear-top-level-rootfs-node lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb
+  KERNEL_IN_UBI := 1
+  IMAGE_SIZE := 81920k
+  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+  IMAGES += factory.img
+  # Padding to 10M seems to be required by OEM web interface
+  IMAGE/factory.img := sysupgrade-tar | \
+	  pad-to 10M | check-size | netgear-encrypted-factory
+endef
+TARGET_DEVICES += netgear_eax17
 
 define Device/netgear_wax220
   DEVICE_VENDOR := NETGEAR
@@ -2335,7 +2458,7 @@ define Device/teltonika_rutc50
   KERNEL_IN_UBI := 1
   UBINIZE_OPTS := -E 5
   DEVICE_PACKAGES := kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware kmod-usb3 kmod-usb-net-qmi-wwan \
-  kmod-usb-serial-option kmod-gpio-nxp-74hc164
+  kmod-usb-serial-option kmod-gpio-nxp-74hc164 uqmi automount
   IMAGES += factory.bin
   IMAGE/factory.bin := append-ubi | append-teltonika-metadata
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
@@ -2408,6 +2531,21 @@ define Device/tplink_fr365-v1
   DEVICE_PACKAGES := fitblk kmod-sfp kmod-usb3 kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware automount
 endef
 TARGET_DEVICES += tplink_fr365-v1
+
+define Device/tplink_be450
+  DEVICE_VENDOR := TP-Link
+  DEVICE_MODEL := BE450
+  DEVICE_DTS := mt7988d-tplink-be450
+  DEVICE_DTS_DIR := ../dts
+  DEVICE_PACKAGES := kmod-mt7992-firmware kmod-usb3 automount \
+	    mt7988-2p5g-phy-firmware mt7988-wo-firmware
+  UBINIZE_OPTS := -E 5
+  BLOCKSIZE := 128k
+  PAGESIZE := 2048
+  IMAGE_SIZE := 51200k
+  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+endef
+TARGET_DEVICES += tplink_be450
 
 define Device/tplink_re6000xd
   DEVICE_VENDOR := TP-Link
@@ -2560,6 +2698,24 @@ define Device/unielec_u7981-01-nand
   $(call Device/unielec_u7981-01)
 endef
 TARGET_DEVICES += unielec_u7981-01-nand
+
+define Device/wavlink_wl-wn536ax6-a
+  DEVICE_VENDOR := WAVLINK
+  DEVICE_MODEL := WL-WN536AX6
+  DEVICE_VARIANT := Rev a
+  DEVICE_DTS := mt7986a-wavlink-wl-wn536ax6-a
+  DEVICE_DTS_DIR := ../dts
+  DEVICE_DTS_LOADADDR := 0x47000000
+  UBINIZE_OPTS := -E 5
+  BLOCKSIZE := 128k
+  PAGESIZE := 2048
+  IMAGE_SIZE := 65536k
+  KERNEL_INITRAMFS_SUFFIX := .itb
+  KERNEL_IN_UBI := 1
+  DEVICE_PACKAGES := kmod-usb3 kmod-mt7915e kmod-mt7986-firmware mt7986-wo-firmware
+  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+endef
+TARGET_DEVICES += wavlink_wl-wn536ax6-a
 
 define Device/wavlink_wl-wn551x3
   DEVICE_VENDOR := WAVLINK
@@ -2831,6 +2987,8 @@ define Device/zbtlink_zbt-z8102ax-v2
   IMAGES += factory.bin
   IMAGE/factory.bin := append-ubi | check-size $$(IMAGE_SIZE)
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+  DEVICE_COMPAT_VERSION := 1.1
+  DEVICE_COMPAT_MESSAGE := Partition layout has been changed to fit the bootloader
 endef
 TARGET_DEVICES += zbtlink_zbt-z8102ax-v2
 

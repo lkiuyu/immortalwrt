@@ -6,7 +6,6 @@
 #include <net/dsa.h>
 #include "rtl838x.h"
 
-
 #define RTL8380_VERSION_A 'A'
 #define RTL8390_VERSION_A 'A'
 #define RTL8380_VERSION_B 'B'
@@ -20,7 +19,9 @@ struct fdb_update_work {
 enum mib_reg {
 	MIB_REG_INVALID = 0,
 	MIB_REG_STD,
-	MIB_REG_PRV
+	MIB_REG_PRV,
+	MIB_TBL_STD,
+	MIB_TBL_PRV,
 };
 
 #define MIB_ITEM(_reg, _offset, _size) \
@@ -135,7 +136,7 @@ void __init rtl83xx_setup_qos(struct rtl838x_switch_priv *priv);
 void rtl83xx_fast_age(struct dsa_switch *ds, int port);
 int rtl83xx_packet_cntr_alloc(struct rtl838x_switch_priv *priv);
 int rtl83xx_port_get_stp_state(struct rtl838x_switch_priv *priv, int port);
-int rtl83xx_port_is_under(const struct net_device * dev, struct rtl838x_switch_priv *priv);
+int rtl83xx_port_is_under(const struct net_device *dev, struct rtl838x_switch_priv *priv);
 void rtl83xx_port_stp_state_set(struct dsa_switch *ds, int port, u8 state);
 int rtl83xx_setup_tc(struct net_device *dev, enum tc_setup_type type, void *type_data);
 
@@ -205,7 +206,15 @@ void rtl930x_pie_rule_dump_raw(u32 r[]);
 
 void rtl931x_print_matrix(void);
 
-void rtldsa_930x_set_receive_management_action(int port, rma_ctrl_t type, action_type_t action);
-void rtldsa_931x_set_receive_management_action(int port, rma_ctrl_t type, action_type_t action);
+extern const struct dsa_switch_ops rtl83xx_switch_ops;
+extern const struct dsa_switch_ops rtl93xx_switch_ops;
+
+extern const struct rtl838x_reg rtl838x_reg;
+extern const struct rtl838x_reg rtl839x_reg;
+extern const struct rtl838x_reg rtl930x_reg;
+extern const struct rtl838x_reg rtl931x_reg;
+
+/* TODO actually from arch/mips/rtl838x/prom.c */
+extern struct rtl83xx_soc_info soc_info;
 
 #endif /* _NET_DSA_RTL83XX_H */

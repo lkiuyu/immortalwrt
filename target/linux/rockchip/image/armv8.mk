@@ -20,6 +20,12 @@ define Device/rk3399
   BOOT_FLOW := pine64-bin
 endef
 
+define Device/rk3528
+  SOC := rk3528
+  KERNEL_LOADADDR := 0x03000000
+  BOOT_FLOW := pine64-img
+endef
+
 define Device/rk3566
   SOC := rk3566
   KERNEL_LOADADDR := 0x03000000
@@ -60,6 +66,20 @@ define Device/IfnameMigration
   DEVICE_COMPAT_VERSION := 1.1
   DEVICE_COMPAT_MESSAGE := Network interface names have been changed
 endef
+
+define Device/9tripod_x3568-v4
+  $(Device/rk3568)
+  DEVICE_VENDOR := 9Tripod
+  DEVICE_MODEL := X3568
+  DEVICE_VARIANT := v4
+  DEVICE_DTS := rk3568-9tripod-x3568-v4
+  SUPPORTED_DEVICES := ninetripod,x3568-v4
+  DEVICE_PACKAGES := blkdiscard block-mount kmod-ata-ahci-dwc kmod-nvme kmod-hwmon-pwmfan \
+	kmod-input-adc-keys kmod-saradc-rockchip kmod-rtc-pcf8563 kmod-brcmfmac wpad-openssl \
+	brcmfmac-firmware-43752-sdio brcmfmac-nvram-43752-sdio
+  UBOOT_DEVICE_NAME := 9tripod-x3568-v4-rk3568
+endef
+TARGET_DEVICES += 9tripod_x3568-v4
 
 define Device/ariaboard_photonicat
   $(Device/rk3568)
@@ -256,6 +276,14 @@ define Device/huake_guangmiao-g4c
 endef
 TARGET_DEVICES += huake_guangmiao-g4c
 
+define Device/linkease_easepi-r1
+  $(Device/rk3568)
+  DEVICE_VENDOR := LinkEase
+  DEVICE_MODEL := EasePi R1
+  DEVICE_PACKAGES := blkdiscard block-mount kmod-button-hotplug kmod-nvme kmod-r8125
+endef
+TARGET_DEVICES += linkease_easepi-r1
+
 define Device/lunzn_fastrhino-r66s
   $(Device/rk3568)
   DEVICE_VENDOR := Lunzn
@@ -293,22 +321,11 @@ define Device/mmbox_anas3035
 endef
 TARGET_DEVICES += mmbox_anas3035
 
-define Device/ninetripod_x3568-v4
-  $(Device/rk3568)
-  DEVICE_VENDOR := NineTripod
-  DEVICE_MODEL := X3568
-  DEVICE_VARIANT := v4
-  DEVICE_PACKAGES := blkdiscard block-mount kmod-ata-ahci-dwc kmod-nvme kmod-hwmon-pwmfan \
-	kmod-input-adc-keys kmod-saradc-rockchip kmod-rtc-pcf8563 kmod-brcmfmac wpad-openssl \
-	brcmfmac-firmware-43752-sdio brcmfmac-nvram-43752-sdio
-endef
-TARGET_DEVICES += ninetripod_x3568-v4
-
 define Device/nlnet_xiguapi-v3
   $(Device/rk3568)
   DEVICE_VENDOR := NLnet
   DEVICE_MODEL := XiGuaPi V3
-  DEVICE_PACKAGES := wpad-openssl kmod-hwmon-pwmfan
+  DEVICE_PACKAGES := kmod-hwmon-pwmfan
 endef
 TARGET_DEVICES += nlnet_xiguapi-v3
 
@@ -336,6 +353,16 @@ define Device/radxa_cm3-io
 endef
 TARGET_DEVICES += radxa_cm3-io
 
+define Device/radxa_e20c
+  $(Device/rk3528)
+  DEVICE_VENDOR := Radxa
+  DEVICE_MODEL := E20C
+  DEVICE_DTS := rk3528-radxa-e20c
+  UBOOT_DEVICE_NAME := radxa-e20c-rk3528
+  DEVICE_PACKAGES := kmod-r8169
+endef
+TARGET_DEVICES += radxa_e20c
+
 define Device/radxa_e25
   $(Device/rk3568)
   DEVICE_VENDOR := Radxa
@@ -354,8 +381,26 @@ define Device/radxa_e52c
   DEVICE_DTS := rk3582-radxa-e52c
   UBOOT_DEVICE_NAME := generic-rk3588
   DEVICE_PACKAGES := blkdiscard kmod-r8125
+  DEVICE_COMPAT_VERSION := 1.1
+  DEVICE_COMPAT_MESSAGE := Network interface names have been changed
 endef
 TARGET_DEVICES += radxa_e52c
+
+define Device/radxa_rock-2a
+  $(Device/rk3528)
+  DEVICE_VENDOR := Radxa
+  DEVICE_MODEL := ROCK 2A
+  UBOOT_DEVICE_NAME := rock-2-rk3528
+endef
+TARGET_DEVICES += radxa_rock-2a
+
+define Device/radxa_rock-2f
+  $(Device/rk3528)
+  DEVICE_VENDOR := Radxa
+  DEVICE_MODEL := ROCK 2F
+  UBOOT_DEVICE_NAME := rock-2-rk3528
+endef
+TARGET_DEVICES += radxa_rock-2f
 
 define Device/radxa_rock-3a
   $(Device/rk3568)
@@ -517,6 +562,14 @@ define Device/sinovoip_bpi-r2-pro
   DEVICE_PACKAGES := kmod-ata-ahci-dwc
 endef
 TARGET_DEVICES += sinovoip_bpi-r2-pro
+
+define Device/widora_mangopi-m28k
+  $(Device/rk3528)
+  DEVICE_VENDOR := Widora
+  DEVICE_MODEL := MangoPi M28K
+  DEVICE_PACKAGES := kmod-aic8800-sdio wpad-openssl kmod-r8169
+endef
+TARGET_DEVICES += widora_mangopi-m28k
 
 define Device/xunlong_orangepi-5
   $(Device/rk3588s)
