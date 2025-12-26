@@ -331,12 +331,14 @@ static int __init rtl83xx_mdio_probe(struct rtl838x_switch_priv *priv)
 			continue;
 		}
 
-		priv->pcs[pn] = rtpcs_create(priv->dev, pcs_node, pn);
-		if (IS_ERR(priv->pcs[pn])) {
-			dev_err(priv->dev, "port %u failed to create PCS instance: %ld\n",
-				pn, PTR_ERR(priv->pcs[pn]));
-			priv->pcs[pn] = NULL;
-			continue;
+		if (pcs_node) {
+			priv->pcs[pn] = rtpcs_create(priv->dev, pcs_node, pn);
+			if (IS_ERR(priv->pcs[pn])) {
+				dev_err(priv->dev, "port %u failed to create PCS instance: %ld\n",
+					pn, PTR_ERR(priv->pcs[pn]));
+				priv->pcs[pn] = NULL;
+				continue;
+			}
 		}
 
 		if (of_get_phy_mode(dn, &interface))
@@ -369,14 +371,6 @@ static int __init rtl83xx_mdio_probe(struct rtl838x_switch_priv *priv)
 			continue;
 		}
 
-		/* Check for the integrated SerDes of the RTL8380M first */
-		if (of_property_read_bool(phy_node, "phy-is-integrated")
-		    && priv->id == 0x8380 && pn >= 24) {
-			pr_debug("----> FOUND A SERDES\n");
-			priv->ports[pn].phy = PHY_RTL838X_SDS;
-			continue;
-		}
-
 		if (of_property_read_bool(phy_node, "phy-is-integrated") &&
 		    !of_property_read_bool(phy_node, "sfp")) {
 			priv->ports[pn].phy = PHY_RTL8218B_INT;
@@ -406,13 +400,6 @@ static int __init rtl83xx_mdio_probe(struct rtl838x_switch_priv *priv)
 	} else if (priv->family_id == RTL8390_FAMILY_ID) {
 		/* Disable PHY polling via SoC */
 		sw_w32_mask(BIT(7), 0, RTL839X_SMI_GLB_CTRL);
-	}
-
-	/* Power on fibre ports and reset them if necessary */
-	if (priv->ports[24].phy == PHY_RTL838X_SDS) {
-		pr_debug("Powering on fibre ports & reset\n");
-		rtl8380_sds_power(24, 1);
-		rtl8380_sds_power(26, 1);
 	}
 
 	return 0;
