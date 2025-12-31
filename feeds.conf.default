@@ -1,4 +1,4 @@
-src-git-full openstick https://github.com/lkiuyu/openstick-feeds.git
+#src-git-full openstick https://github.com/lkiuyu/openstick-feeds.git
 src-git packages https://github.com/immortalwrt/packages.git
 src-git luci https://github.com/immortalwrt/luci.git
 src-git routing https://github.com/openwrt/routing.git
@@ -8,4 +8,4 @@ src-git video https://github.com/openwrt/video.git
 #src-git oldpackages http://git.openwrt.org/packages.git
 #src-link custom /usr/src/openwrt/custom-feed
 
-#src-git-full openstick https://github.com/xuxin1955/openstick-feeds.git
+src-git-full openstick https://github.com/xuxin1955/openstick-feeds.git
