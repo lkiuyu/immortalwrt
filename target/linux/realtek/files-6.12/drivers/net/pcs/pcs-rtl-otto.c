@@ -98,12 +98,6 @@
 #define RTPCS_930X_SDS_SUBMODE_USXGMII_SX	0x0
 #define RTPCS_930X_SDS_SUBMODE_USXGMII_QX	0x2
 
-#define RTSDS_930X_PLL_1000		0x1
-#define RTSDS_930X_PLL_10000		0x5
-#define RTSDS_930X_PLL_2500		0x3
-#define RTPCS_930X_PLL_LC		0x3
-#define RTPCS_930X_PLL_RING		0x1
-
 /* Registers of the internal SerDes of the 9310 */
 #define RTPCS_931X_MAC_GROUP0_1_CTRL		(0x13a4)
 #define RTPCS_931X_MAC_GROUP2_3_CTRL		(0x13a8)
@@ -153,9 +147,16 @@ enum rtpcs_port_media {
 };
 
 enum rtpcs_sds_pll_type {
-	RTPCS_SDS_PLL_RING,
-	RTPCS_SDS_PLL_LC,
-	RTPCS_SDS_PLL_END,
+	RTPCS_SDS_PLL_TYPE_RING = 0,
+	RTPCS_SDS_PLL_TYPE_LC = 1,
+	RTPCS_SDS_PLL_TYPE_END,
+};
+
+enum rtpcs_sds_pll_speed {
+	RTPCS_SDS_PLL_SPD_1000 = 0,
+	RTPCS_SDS_PLL_SPD_2500 = 1,
+	RTPCS_SDS_PLL_SPD_10000 = 2,
+	RTPCS_SDS_PLL_SPD_END,
 };
 
 enum rtpcs_chip_version {
@@ -178,6 +179,14 @@ struct rtpcs_serdes_ops {
 	int (*set_autoneg)(struct rtpcs_serdes *sds, unsigned int neg_mode,
 			   const unsigned long *advertising);
 	void (*restart_autoneg)(struct rtpcs_serdes *sds);
+
+	/* CMU management */
+	int (*get_pll_select)(struct rtpcs_serdes *sds, enum rtpcs_sds_pll_type *pll);
+	int (*set_pll_select)(struct rtpcs_serdes *sds, enum rtpcs_sds_mode hw_mode,
+			      enum rtpcs_sds_pll_type pll);
+	int (*reset_cmu)(struct rtpcs_serdes *sds, enum rtpcs_sds_pll_type pll);
+	/* online reconfiguration of a running SerDes to another PLL */
+	int (*reconfigure_to_pll)(struct rtpcs_serdes *sds, enum rtpcs_sds_pll_type pll);
 };
 
 struct rtpcs_sds_reg_field {
@@ -513,6 +522,34 @@ static int rtpcs_generic_sds_set_autoneg(struct rtpcs_serdes *sds, unsigned int 
 static void rtpcs_generic_sds_restart_autoneg(struct rtpcs_serdes *sds)
 {
 	rtpcs_sds_write_field(sds, &sds->regs->an_restart, 0x1);
+}
+
+static int rtpcs_sds_select_pll_speed(enum rtpcs_sds_mode hw_mode, enum rtpcs_sds_pll_speed *speed)
+{
+	switch (hw_mode) {
+	case RTPCS_SDS_MODE_1000BASEX:
+	case RTPCS_SDS_MODE_SGMII:
+	case RTPCS_SDS_MODE_QSGMII:
+		*speed = RTPCS_SDS_PLL_SPD_1000;
+		break;
+	case RTPCS_SDS_MODE_2500BASEX:
+		*speed = RTPCS_SDS_PLL_SPD_2500;
+		break;
+	case RTPCS_SDS_MODE_10GBASER:
+	case RTPCS_SDS_MODE_XSGMII:
+	case RTPCS_SDS_MODE_USXGMII_10GSXGMII:
+	case RTPCS_SDS_MODE_USXGMII_10GDXGMII:
+	case RTPCS_SDS_MODE_USXGMII_10GQXGMII:
+	case RTPCS_SDS_MODE_USXGMII_5GSXGMII:
+	case RTPCS_SDS_MODE_USXGMII_5GDXGMII:
+	case RTPCS_SDS_MODE_USXGMII_2_5GSXGMII:
+		*speed = RTPCS_SDS_PLL_SPD_10000;
+		break;
+	default:
+		return -ENOTSUPP;
+	}
+
+	return 0;
 }
 
 /* Variant-specific functions */
@@ -1082,6 +1119,146 @@ static int rtpcs_93xx_init_serdes_common(struct rtpcs_ctrl *ctrl)
 	return 0;
 }
 
+static int rtpcs_93xx_sds_get_pll_config(struct rtpcs_serdes *sds, enum rtpcs_sds_pll_type pll,
+					 enum rtpcs_sds_pll_speed *speed)
+{
+	struct rtpcs_serdes *even_sds = rtpcs_sds_get_even(sds);
+	int sbit, speed_val;
+
+	/*
+	 * PLL config is shared between adjacent SerDes in the even lane. Each SerDes defines
+	 * what PLL it needs (ring or LC) while the PLL itself stores the current speed.
+	 */
+
+	sbit = pll == RTPCS_SDS_PLL_TYPE_LC ? 8 : 12;
+	speed_val = rtpcs_sds_read_bits(even_sds, 0x20, 0x12, sbit + 3, sbit);
+	if (speed_val < 0)
+		return speed_val;
+
+	/* bit 0 is force-bit, bits [3:1] are speed selector */
+	*speed = (enum rtpcs_sds_pll_speed)(speed_val >> 1);
+	return 0;
+}
+
+static int rtpcs_93xx_sds_set_pll_config(struct rtpcs_serdes *sds, enum rtpcs_sds_pll_type pll,
+					 enum rtpcs_sds_pll_speed speed)
+{
+	struct rtpcs_serdes *even_sds = rtpcs_sds_get_even(sds);
+	int sbit = pll == RTPCS_SDS_PLL_TYPE_LC ? 8 : 12;
+	int ret;
+
+	if (speed >= RTPCS_SDS_PLL_SPD_END)
+		return -EINVAL;
+
+	if (pll >= RTPCS_SDS_PLL_TYPE_END)
+		return -EINVAL;
+
+	if ((pll == RTPCS_SDS_PLL_TYPE_RING) && (speed == RTPCS_SDS_PLL_SPD_10000))
+		return -EINVAL;
+
+	/*
+	 * A SerDes clock can either be taken from the low speed ring PLL or the high speed
+	 * LC PLL. As it is unclear if disabling PLLs has any positive or negative effect,
+	 * always activate both.
+	 */
+	ret = rtpcs_sds_write_bits(even_sds, 0x20, 0x12, 3, 0, 0xf);
+	if (ret < 0)
+		return ret;
+
+	/* bit 0 is force-bit, bits [3:1] are speed selector */
+	ret = rtpcs_sds_write_bits(even_sds, 0x20, 0x12, sbit + 3, sbit, (speed << 1) | BIT(0));
+	if (ret < 0)
+		return ret;
+
+	if (sds->ops->reset_cmu)
+		ret = sds->ops->reset_cmu(sds, pll);
+
+	return ret;
+}
+
+static int rtpcs_93xx_sds_config_cmu(struct rtpcs_serdes *sds, enum rtpcs_sds_mode hw_mode)
+{
+	struct rtpcs_serdes *nb_sds = rtpcs_sds_get_neighbor(sds);
+	enum rtpcs_sds_pll_speed speed, neighbor_speed;
+	enum rtpcs_sds_pll_type pll, neighbor_pll;
+	bool speed_changed = true;
+	int ret;
+
+	/*
+	 * A SerDes pair on RTL93xx is driven by a shared CMU with two PLLs:
+	 *
+	 * - a low speed ring PLL which can generate signals of 1.25G and 3.125G for link
+	 *   speeds of 1G/2.5G
+	 * - a high speed LC PLL which can additionally generate a 10.3125G signal for
+	 *   10G link speeds
+	 *
+	 * To drive the pair at different speeds, each SerDes must use its own PLL and we
+	 * must wisely assign the PLLs to the SerDes based on their needs. The logic boils
+	 * down to the following rules:
+	 *
+	 * - use ring PLL for slow 1G speeds
+	 * - use LC PLL for fast 10G speeds
+	 * - for 2.5G prefer ring over LC PLL
+	 *
+	 * For the case that we want to configure 10G speed but the LC PLL is already used
+	 * by the neighbor SerDes and running with a slower speed, there's no way to avoid
+	 * reconfiguration. The neighbor SerDes is reconfigured online to the ring PLL.
+	 */
+
+	if (hw_mode == RTPCS_SDS_MODE_OFF)
+		return 0;
+
+	ret = rtpcs_sds_select_pll_speed(hw_mode, &speed);
+	if (ret < 0)
+		return ret;
+
+	if (nb_sds->hw_mode == RTPCS_SDS_MODE_OFF) {
+		pll = (speed == RTPCS_SDS_PLL_SPD_10000) ? RTPCS_SDS_PLL_TYPE_LC
+							 : RTPCS_SDS_PLL_TYPE_RING;
+		goto pll_setup;
+	}
+
+	ret = nb_sds->ops->get_pll_select(nb_sds, &neighbor_pll);
+	if (ret < 0)
+		return ret;
+
+	ret = rtpcs_93xx_sds_get_pll_config(nb_sds, neighbor_pll, &neighbor_speed);
+	if (ret < 0)
+		return ret;
+
+	if (speed == neighbor_speed) {
+		speed_changed = false;
+		pll = neighbor_pll;
+	} else if (neighbor_pll == RTPCS_SDS_PLL_TYPE_RING)
+		pll = RTPCS_SDS_PLL_TYPE_LC;
+	else if (speed == RTPCS_SDS_PLL_SPD_10000) {
+		pr_info("%s: SDS %d needs LC PLL, reconfigure SDS %d to use ring PLL\n",
+			__func__, sds->id, nb_sds->id);
+
+		ret = nb_sds->ops->reconfigure_to_pll(nb_sds, RTPCS_SDS_PLL_TYPE_RING);
+		if (ret < 0)
+			return ret;
+
+		pll = RTPCS_SDS_PLL_TYPE_LC;
+	} else
+		pll = RTPCS_SDS_PLL_TYPE_RING;
+
+pll_setup:
+	if (speed_changed) {
+		ret = rtpcs_93xx_sds_set_pll_config(sds, pll, speed);
+		if (ret < 0)
+			return ret;
+	}
+
+	ret = sds->ops->set_pll_select(sds, hw_mode, pll);
+	if (ret < 0)
+		return ret;
+
+	pr_info("%s: SDS %d using %s PLL for mode %d\n", __func__, sds->id,
+		pll == RTPCS_SDS_PLL_TYPE_LC ? "LC" : "ring", hw_mode);
+	return ret;
+}
+
 /* RTL930X */
 
 /* 
@@ -1238,64 +1415,38 @@ static void rtpcs_930x_sds_rx_reset(struct rtpcs_serdes *sds,
 	rtpcs_sds_write_bits(sds, page, 0x15, 4, 4, 0x0);
 }
 
-static void rtpcs_930x_sds_get_pll_data(struct rtpcs_serdes *sds, enum rtpcs_sds_pll_type *pll,
-					int *speed)
+static int rtpcs_930x_sds_get_pll_select(struct rtpcs_serdes *sds, enum rtpcs_sds_pll_type *pll)
 {
 	struct rtpcs_serdes *even_sds = rtpcs_sds_get_even(sds);
-	int sbit, pbit = (sds == even_sds) ? 4 : 6;
-	int pll_val;
-
-	/*
-	 * PLL data is shared between adjacent SerDes in the even lane. Each SerDes defines
-	 * what PLL it needs (ring or LC) while the PLL itself stores the current speed.
-	 */
-
-	pll_val = rtpcs_sds_read_bits(even_sds, 0x20, 0x12, pbit + 1, pbit);
-	*pll = pll_val == RTPCS_930X_PLL_LC ? RTPCS_SDS_PLL_LC : RTPCS_SDS_PLL_RING;
-
-	sbit = *pll == RTPCS_SDS_PLL_LC ? 8 : 12;
-	*speed = rtpcs_sds_read_bits(even_sds, 0x20, 0x12, sbit + 3, sbit);
-}
-
-static int rtpcs_930x_sds_set_pll_data(struct rtpcs_serdes *sds, enum rtpcs_sds_pll_type pll,
-				       int speed)
-{
-	struct rtpcs_serdes *even_sds = rtpcs_sds_get_even(sds);
-	int sbit = pll == RTPCS_SDS_PLL_LC ? 8 : 12;
 	int pbit = (sds == even_sds) ? 4 : 6;
-	int pll_val;
+	int pll_sel;
 
-	if ((speed != RTSDS_930X_PLL_1000) &&
-	    (speed != RTSDS_930X_PLL_2500) &&
-	    (speed != RTSDS_930X_PLL_10000))
-		return -EINVAL;
+	pll_sel = rtpcs_sds_read_bits(even_sds, 0x20, 0x12, pbit + 1, pbit);
+	if (pll_sel < 0)
+		return pll_sel;
 
-	if (pll >= RTPCS_SDS_PLL_END)
-		return -EINVAL;
-
-	if ((pll == RTPCS_SDS_PLL_RING) && (speed == RTSDS_930X_PLL_10000))
-		return -EINVAL;
-
-	/*
-	 * A SerDes clock can either be taken from the low speed ring PLL or the high speed
-	 * LC PLL. As it is unclear if disabling PLLs has any positive or negative effect,
-	 * always activate both.
-	 */
-
-	pll_val = pll == RTPCS_SDS_PLL_LC ? RTPCS_930X_PLL_LC : RTPCS_930X_PLL_RING;
-	rtpcs_sds_write_bits(even_sds, 0x20, 0x12, 3, 0, 0xf);
-	rtpcs_sds_write_bits(even_sds, 0x20, 0x12, pbit + 1, pbit, pll_val);
-	rtpcs_sds_write_bits(even_sds, 0x20, 0x12, sbit + 3, sbit, speed);
-
+	/* bit 0 is force-bit, bit 1 is PLL selector */
+	*pll = (enum rtpcs_sds_pll_type)(pll_sel >> 1);
 	return 0;
 }
 
-static void rtpcs_930x_sds_reset_cmu(struct rtpcs_serdes *sds)
+static int rtpcs_930x_sds_set_pll_select(struct rtpcs_serdes *sds, enum rtpcs_sds_mode hw_mode,
+					 enum rtpcs_sds_pll_type pll)
+{
+	struct rtpcs_serdes *even_sds = rtpcs_sds_get_even(sds);
+	int pbit = (sds == even_sds) ? 4 : 6;
+
+	/* Selecting the PLL a SerDes is done in the even lane register */
+
+	/* bit 0 is force-bit, bit 1 is PLL selector */
+	return rtpcs_sds_write_bits(even_sds, 0x20, 0x12, pbit + 1, pbit, (pll << 1) | BIT(0));
+}
+
+static int rtpcs_930x_sds_reset_cmu(struct rtpcs_serdes *sds, enum rtpcs_sds_pll_type pll)
 {
 	struct rtpcs_serdes *even_sds = rtpcs_sds_get_even(sds);
 	int reset_sequence[4] = { 3, 2, 3, 1 };
-	enum rtpcs_sds_pll_type pll;
-	int speed, i, bit;
+	int bit, i, ret;
 
 	/*
 	 * After the PLL speed has changed, the CMU must take over the new values. The models
@@ -1303,12 +1454,15 @@ static void rtpcs_930x_sds_reset_cmu(struct rtpcs_serdes *sds)
 	 * to flipping two bits in a special sequence.
 	 */
 
-	rtpcs_930x_sds_get_pll_data(sds, &pll, &speed);
-	bit = pll == RTPCS_SDS_PLL_LC ? 2 : 0;
+	bit = pll == RTPCS_SDS_PLL_TYPE_LC ? 2 : 0;
 
-	for (i = 0; i < ARRAY_SIZE(reset_sequence); i++)
-		rtpcs_sds_write_bits(even_sds, 0x21, 0x0b, bit + 1, bit,
-				     reset_sequence[i]);
+	for (i = 0; i < ARRAY_SIZE(reset_sequence); i++) {
+		ret = rtpcs_sds_write_bits(even_sds, 0x21, 0x0b, bit + 1, bit,
+					   reset_sequence[i]);
+		if (ret < 0)
+			return ret;
+	}
+	return 0;
 }
 
 static int rtpcs_930x_sds_wait_clock_ready(struct rtpcs_serdes *sds)
@@ -1356,90 +1510,38 @@ static void rtpcs_930x_sds_set_power(struct rtpcs_serdes *sds, bool on)
 	rtpcs_sds_write_bits(sds, 0x20, 0x00, 5, 4, rx_enable);
 }
 
-static void rtpcs_930x_sds_reconfigure_pll(struct rtpcs_serdes *sds, enum rtpcs_sds_pll_type pll)
+static int rtpcs_930x_sds_reconfigure_to_pll(struct rtpcs_serdes *sds, enum rtpcs_sds_pll_type pll)
 {
-	enum rtpcs_sds_pll_type tmp;
-	int mode, speed;
+	enum rtpcs_sds_pll_speed speed;
+	enum rtpcs_sds_pll_type old_pll;
+	int mode, ret;
 
 	mode = __rtpcs_930x_sds_get_ip_mode(sds);
-	rtpcs_930x_sds_get_pll_data(sds, &tmp, &speed);
+
+	ret = rtpcs_930x_sds_get_pll_select(sds, &old_pll);
+	if (ret < 0)
+		return ret;
+
+	ret = rtpcs_93xx_sds_get_pll_config(sds, old_pll, &speed);
+	if (ret < 0)
+		return ret;
 
 	rtpcs_930x_sds_set_power(sds, false);
 	__rtpcs_930x_sds_set_ip_mode(sds, RTPCS_930X_SDS_OFF);
 
-	rtpcs_930x_sds_set_pll_data(sds, pll, speed);
-	rtpcs_930x_sds_reset_cmu(sds);
+	ret = rtpcs_93xx_sds_set_pll_config(sds, pll, speed);
+	if (ret < 0)
+		return ret;
+
+	ret = rtpcs_930x_sds_set_pll_select(sds, sds->hw_mode, pll);
+	if (ret < 0)
+		return ret;
 
 	__rtpcs_930x_sds_set_ip_mode(sds, mode);
 	if (rtpcs_930x_sds_wait_clock_ready(sds))
 		pr_err("%s: SDS %d could not sync clock\n", __func__, sds->id);
 
 	rtpcs_930x_sds_set_power(sds, true);
-}
-
-static int rtpcs_930x_sds_config_pll(struct rtpcs_serdes *sds,
-				     enum rtpcs_sds_mode hw_mode)
-{
-	struct rtpcs_serdes *nb_sds = rtpcs_sds_get_neighbor(sds);
-	enum rtpcs_sds_pll_type pll, neighbor_pll;
-	int speed, neighbor_speed, neighbor_mode;
-	bool speed_changed = true;
-
-	/*
-	 * A SerDes pair on the RTL930x is driven by two PLLs. A low speed ring PLL can generate
-	 * signals of 1.25G and 3.125G for link speeds of 1G/2.5G. A high speed LC PLL can
-	 * additionally generate a 10.3125G signal for 10G speeds. To drive the pair at different
-	 * speeds each SerDes must use its own PLL. But what if the SerDess attached to the ring
-	 * PLL suddenly needs 10G but the LC PLL is running at 1G? To avoid reconfiguring the
-	 * "partner" SerDes we must choose wisely what assignment serves the current needs. The
-	 * logic boils down to the following rules:
-	 *
-	 * - Use ring PLL for slow 1G speeds
-	 * - Use LC PLL for fast 10G speeds
-	 * - For 2.5G prefer ring over LC PLL
-	 *
-	 * However, when we want to configure 10G speed while the other SerDes is already using
-	 * the LC PLL for a slower speed, there is no way to avoid reconfiguration. Note that
-	 * this can even happen when the other SerDes is not actually in use, because changing
-	 * the state of a SerDes back to RTL930X_SDS_OFF is not (yet) implemented.
-	 */
-
-	neighbor_mode = __rtpcs_930x_sds_get_ip_mode(nb_sds);
-	rtpcs_930x_sds_get_pll_data(nb_sds, &neighbor_pll, &neighbor_speed);
-
-	if ((hw_mode == RTPCS_SDS_MODE_1000BASEX) ||
-	    (hw_mode == RTPCS_SDS_MODE_SGMII))
-		speed = RTSDS_930X_PLL_1000;
-	else if (hw_mode == RTPCS_SDS_MODE_2500BASEX)
-		speed = RTSDS_930X_PLL_2500;
-	else if (hw_mode == RTPCS_SDS_MODE_10GBASER)
-		speed = RTSDS_930X_PLL_10000;
-	else
-		return -ENOTSUPP;
-
-	if (!neighbor_mode)
-		pll = speed == RTSDS_930X_PLL_10000 ? RTPCS_SDS_PLL_LC : RTPCS_SDS_PLL_RING;
-	else if (speed == neighbor_speed) {
-		speed_changed = false;
-		pll = neighbor_pll;
-	} else if (neighbor_pll == RTPCS_SDS_PLL_RING)
-		pll = RTPCS_SDS_PLL_LC;
-	else if (speed == RTSDS_930X_PLL_10000) {
-		pr_info("%s: SDS %d needs LC PLL, reconfigure SDS %d to use ring PLL\n",
-			__func__, sds->id, nb_sds->id);
-		rtpcs_930x_sds_reconfigure_pll(nb_sds, RTPCS_SDS_PLL_RING);
-		pll = RTPCS_SDS_PLL_LC;
-	} else
-		pll = RTPCS_SDS_PLL_RING;
-
-	rtpcs_930x_sds_set_pll_data(sds, pll, speed);
-
-	if (speed_changed)
-		rtpcs_930x_sds_reset_cmu(sds);
-
-	pr_info("%s: SDS %d using %s PLL for mode %d\n", __func__, sds->id,
-		pll == RTPCS_SDS_PLL_LC ? "LC" : "ring", hw_mode);
-
 	return 0;
 }
 
@@ -1532,9 +1634,10 @@ static int rtpcs_930x_sds_set_ip_mode(struct rtpcs_serdes *sds,
 	if (hw_mode == RTPCS_SDS_MODE_OFF)
 		return 0;
 
-	if (rtpcs_930x_sds_config_pll(sds, hw_mode))
-		pr_err("%s: SDS %d could not configure PLL for mode %d\n", __func__,
-		       sds->id, hw_mode);
+	ret = rtpcs_93xx_sds_config_cmu(sds, hw_mode);
+	if (ret < 0)
+		pr_err("%s: SDS %d could not configure PLL for mode %d: %d\n", __func__,
+		       sds->id, hw_mode, ret);
 
 	ret = __rtpcs_930x_sds_set_ip_mode(sds, mode_val);
 	if (ret < 0)
@@ -1748,11 +1851,8 @@ static void rtpcs_930x_sds_rxcal_dcvs_get(struct rtpcs_serdes *sds,
 	else
 		rtpcs_sds_write(even_sds, 0x1f, 0x2, 0x31);
 
-	/* ##Page0x2E, Reg0x15[9], REG0_RX_EN_TEST=[1] */
-	rtpcs_sds_write_bits(sds, 0x2e, 0x15, 9, 9, 0x1);
-
-	/* ##Page0x21, Reg0x06[11 6], REG0_RX_DEBUG_SEL=[1 0 x x x x] */
-	rtpcs_sds_write_bits(sds, 0x21, 0x06, 11, 6, 0x20);
+	rtpcs_sds_write_bits(sds, 0x2e, 0x15, 9, 9, 0x1);	/* REG0_RX_EN_TEST */
+	rtpcs_sds_write_bits(sds, 0x21, 0x06, 11, 6, 0x20);	/* REG0_RX_DEBUG_SEL */
 
 	switch (dcvs_id) {
 	case 0:
@@ -1818,13 +1918,8 @@ static void rtpcs_930x_sds_rxcal_dcvs_get(struct rtpcs_serdes *sds,
 		break;
 	}
 
-	if (dcvs_sign_out)
-		pr_info("%s DCVS %u Sign: -", __func__, dcvs_id);
-	else
-		pr_info("%s DCVS %u Sign: +", __func__, dcvs_id);
-
-	pr_info("DCVS %u even coefficient = %u", dcvs_id, dcvs_coef_bin);
-	pr_info("DCVS %u manual = %u", dcvs_id, dcvs_manual);
+	pr_info("%s: DCVS %u sign = %s, manual = %u, even coefficient = %u\n", __func__,
+		dcvs_id, dcvs_sign_out ? "-" : "+", dcvs_manual, dcvs_coef_bin);
 
 	dcvs_list[0] = dcvs_sign_out;
 	dcvs_list[1] = dcvs_coef_bin;
@@ -1886,16 +1981,9 @@ static u32 rtpcs_930x_sds_rxcal_leq_read(struct rtpcs_serdes *sds)
 	u32 leq_gray, leq_bin;
 	bool leq_manual;
 
-	if (sds == even_sds)
-		rtpcs_sds_write(sds, 0x1f, 0x2, 0x2f);
-	else
-		rtpcs_sds_write(even_sds, 0x1f, 0x2, 0x31);
-
-	/* ##Page0x2E, Reg0x15[9], REG0_RX_EN_TEST=[1] */
-	rtpcs_sds_write_bits(sds, 0x2e, 0x15, 9, 9, 0x1);
-
-	/* ##Page0x21, Reg0x06[11 6], REG0_RX_DEBUG_SEL=[0 1 x x x x] */
-	rtpcs_sds_write_bits(sds, 0x21, 0x06, 11, 6, 0x10);
+	rtpcs_sds_write(even_sds, 0x1f, 0x2, (sds == even_sds) ? 0x2f : 0x31); /* REG_DBGO_SEL */
+	rtpcs_sds_write_bits(sds, 0x2e, 0x15, 9, 9, 0x1);	/* REG0_RX_EN_TEST */
+	rtpcs_sds_write_bits(sds, 0x21, 0x06, 11, 6, 0x10);	/* REG0_RX_DEBUG_SEL */
 	mdelay(1);
 
 	/* ##LEQ Read Out */
@@ -1903,7 +1991,7 @@ static u32 rtpcs_930x_sds_rxcal_leq_read(struct rtpcs_serdes *sds)
 	leq_manual = !!rtpcs_sds_read_bits(sds, 0x2e, 0x18, 15, 15);
 	leq_bin = rtpcs_930x_sds_rxcal_gray_to_binary(leq_gray);
 
-	pr_info("LEQ_gray: %u, LEQ_bin: %u", leq_gray, leq_bin);
+	pr_info("LEQ gray: %u, LEQ bin: %u", leq_gray, leq_bin);
 	pr_info("LEQ manual: %u", leq_manual);
 
 	return leq_bin;
@@ -1926,33 +2014,22 @@ static void rtpcs_930x_sds_rxcal_vth_get(struct rtpcs_serdes *sds,
 					 u32 vth_list[])
 {
 	struct rtpcs_serdes *even_sds = rtpcs_sds_get_even(sds);
-	u32 vth_manual;
+	int vth_manual;
 
-	/* ##Page0x1F, Reg0x02[15 0], REG_DBGO_SEL=[0x002F]; */ /* Lane0 */
-	/* ##Page0x1F, Reg0x02[15 0], REG_DBGO_SEL=[0x0031]; */ /* Lane1 */
-	if (sds == even_sds)
-		rtpcs_sds_write(sds, 0x1f, 0x2, 0x2f);
-	else
-		rtpcs_sds_write(even_sds, 0x1f, 0x2, 0x31);
-
-	/* ##Page0x2E, Reg0x15[9], REG0_RX_EN_TEST=[1] */
-	rtpcs_sds_write_bits(sds, 0x2e, 0x15, 9, 9, 0x1);
-	/* ##Page0x21, Reg0x06[11 6], REG0_RX_DEBUG_SEL=[1 0 x x x x] */
-	rtpcs_sds_write_bits(sds, 0x21, 0x06, 11, 6, 0x20);
-	/* ##Page0x2F, Reg0x0C[5 0], REG0_COEF_SEL=[0 0 1 1 0 0] */
-	rtpcs_sds_write_bits(sds, 0x2f, 0x0c, 5, 0, 0xc);
+	rtpcs_sds_write(even_sds, 0x1f, 0x2, (sds == even_sds) ? 0x2f : 0x31); /* REG_DBGO_SEL */
+	rtpcs_sds_write_bits(sds, 0x2e, 0x15, 9, 9, 0x1);	/* REG0_RX_EN_TEST */
+	rtpcs_sds_write_bits(sds, 0x21, 0x06, 11, 6, 0x20);	/* REG0_RX_DEBUG_SEL */
+	rtpcs_sds_write_bits(sds, 0x2f, 0x0c, 5, 0, 0xc);	/* REG0_COEF_SEL */
 
 	mdelay(1);
 
 	/* ##VthP & VthN Read Out */
 	vth_list[0] = rtpcs_sds_read_bits(sds, 0x1f, 0x14, 2, 0); /* v_thp set bin */
 	vth_list[1] = rtpcs_sds_read_bits(sds, 0x1f, 0x14, 5, 3); /* v_thn set bin */
+	vth_manual = rtpcs_sds_read_bits(sds, 0x2e, 0x0f, 13, 13);
 
-	pr_info("vth_set_bin = %d", vth_list[0]);
-	pr_info("vth_set_bin = %d", vth_list[1]);
-
-	vth_manual = !!rtpcs_sds_read_bits(sds, 0x2e, 0x0f, 13, 13);
-	pr_info("Vth Maunal = %d", vth_manual);
+	pr_info("vthp_set_bin = %d, vthn_set_bin = %d, manual = %d\n", vth_list[0], vth_list[1],
+		vth_manual);
 }
 
 static void rtpcs_930x_sds_rxcal_tap_manual(struct rtpcs_serdes *sds,
@@ -2015,63 +2092,42 @@ static void rtpcs_930x_sds_rxcal_tap_get(struct rtpcs_serdes *sds,
 	u32 tap_coef_bin_odd;
 	bool tap_manual;
 
-	if (sds == even_sds)
-		rtpcs_sds_write(sds, 0x1f, 0x2, 0x2f);
-	else
-		rtpcs_sds_write(even_sds, 0x1f, 0x2, 0x31);
-
-	/* ##Page0x2E, Reg0x15[9], REG0_RX_EN_TEST=[1] */
-	rtpcs_sds_write_bits(sds, 0x2e, 0x15, 9, 9, 0x1);
-	/* ##Page0x21, Reg0x06[11 6], REG0_RX_DEBUG_SEL=[1 0 x x x x] */
-	rtpcs_sds_write_bits(sds, 0x21, 0x06, 11, 6, 0x20);
+	rtpcs_sds_write(even_sds, 0x1f, 0x2, (sds == even_sds) ? 0x2f : 0x31); /* REG_DBGO_SEL */
+	rtpcs_sds_write_bits(sds, 0x2e, 0x15, 9, 9, 0x1);	/* REG0_RX_EN_TEST */
+	rtpcs_sds_write_bits(sds, 0x21, 0x06, 11, 6, 0x20);	/* REG0_RX_DEBUG_SEL */
 
 	if (!tap_id) {
-		/* ##Page0x2F, Reg0x0C[5 0], REG0_COEF_SEL=[0 0 0 0 0 1] */
-		rtpcs_sds_write_bits(sds, 0x2f, 0x0c, 5, 0, 0);
+		rtpcs_sds_write_bits(sds, 0x2f, 0x0c, 5, 0, 0);	/* REG0_COEF_SEL */
 		/* ##Tap1 Even Read Out */
 		mdelay(1);
 		tap0_sign_out = rtpcs_sds_read_bits(sds, 0x1f, 0x14, 5, 5);
 		tap0_coef_bin = rtpcs_sds_read_bits(sds, 0x1f, 0x14, 4, 0);
 
-		if (tap0_sign_out == 1)
-			pr_info("Tap0 Sign : -");
-		else
-			pr_info("Tap0 Sign : +");
-
-		pr_info("tap0_coef_bin = %d", tap0_coef_bin);
+		pr_info("tap0: coef_bin = %d, sign = %s\n", tap0_coef_bin,
+			tap0_sign_out ? "-" : "+");
 
 		tap_list[0] = tap0_sign_out;
 		tap_list[1] = tap0_coef_bin;
 
 		tap_manual = !!rtpcs_sds_read_bits(sds, 0x2e, 0x0f, 7, 7);
-		pr_info("tap0 manual = %u", tap_manual);
+		pr_info("tap0: manual = %u\n", tap_manual);
 	} else {
-		/* ##Page0x2F, Reg0x0C[5 0], REG0_COEF_SEL=[0 0 0 0 0 1] */
-		rtpcs_sds_write_bits(sds, 0x2f, 0x0c, 5, 0, tap_id);
+		rtpcs_sds_write_bits(sds, 0x2f, 0x0c, 5, 0, tap_id);		/* REG0_COEF_SEL */
 		mdelay(1);
 		/* ##Tap1 Even Read Out */
 		tap_sign_out_even = rtpcs_sds_read_bits(sds, 0x1f, 0x14, 5, 5);
 		tap_coef_bin_even = rtpcs_sds_read_bits(sds, 0x1f, 0x14, 4, 0);
 
-		/* ##Page0x2F, Reg0x0C[5 0], REG0_COEF_SEL=[0 0 0 1 1 0] */
-		rtpcs_sds_write_bits(sds, 0x2f, 0x0c, 5, 0, (tap_id + 5));
+		rtpcs_sds_write_bits(sds, 0x2f, 0x0c, 5, 0, (tap_id + 5));	/* REG0_COEF_SEL */
 		/* ##Tap1 Odd Read Out */
 		tap_sign_out_odd = rtpcs_sds_read_bits(sds, 0x1f, 0x14, 5, 5);
 		tap_coef_bin_odd = rtpcs_sds_read_bits(sds, 0x1f, 0x14, 4, 0);
 
-		if (tap_sign_out_even == 1)
-			pr_info("Tap %u even sign: -", tap_id);
-		else
-			pr_info("Tap %u even sign: +", tap_id);
+		pr_info("tap%u: even coefficient = %u, sign = %s\n", tap_id, tap_coef_bin_even,
+			tap_sign_out_even ? "-" : "+");
 
-		pr_info("Tap %u even coefficient = %u", tap_id, tap_coef_bin_even);
-
-		if (tap_sign_out_odd == 1)
-			pr_info("Tap %u odd sign: -", tap_id);
-		else
-			pr_info("Tap %u odd sign: +", tap_id);
-
-		pr_info("Tap %u odd coefficient = %u", tap_id, tap_coef_bin_odd);
+		pr_info("tap%u: odd coefficient = %u, sign = %s\n", tap_id, tap_coef_bin_odd,
+			tap_sign_out_odd ? "-" : "+");
 
 		tap_list[0] = tap_sign_out_even;
 		tap_list[1] = tap_coef_bin_even;
@@ -2079,7 +2135,7 @@ static void rtpcs_930x_sds_rxcal_tap_get(struct rtpcs_serdes *sds,
 		tap_list[3] = tap_coef_bin_odd;
 
 		tap_manual = rtpcs_sds_read_bits(sds, 0x2e, 0x0f, tap_id + 7, tap_id + 7);
-		pr_info("tap %u manual = %d", tap_id, tap_manual);
+		pr_info("tap%u: manual = %d\n", tap_id, tap_manual);
 	}
 }
 
@@ -2088,7 +2144,7 @@ static void rtpcs_930x_sds_do_rx_calibration_1(struct rtpcs_serdes *sds,
 {
 	/* From both rtl9300_rxCaliConf_serdes_myParam and rtl9300_rxCaliConf_phy_myParam */
 	int tap0_init_val = 0x1f; /* Initial Decision Fed Equalizer 0 tap */
-	int vth_min       = 0x0;
+	int vth_min = 0x1;
 
 	pr_info("start_1.1.1 initial value for sds %d\n", sds->id);
 	rtpcs_sds_write(sds, 6,  0, 0);
@@ -2158,18 +2214,15 @@ static void rtpcs_930x_sds_do_rx_calibration_1(struct rtpcs_serdes *sds,
 
 	pr_info("start_1.1.5 LEQ and DFE setting\n");
 
-	/* TODO: make this work for DAC cables of different lengths */
-	/* For a 10GBit serdes wit Fibre, SDS 8 or 9 */
-	if (hw_mode == RTPCS_SDS_MODE_10GBASER ||
-	    hw_mode == RTPCS_SDS_MODE_1000BASEX ||
-	    hw_mode == RTPCS_SDS_MODE_SGMII)
-		rtpcs_sds_write_bits(sds, 0x2e, 0x16,  3,  2, 0x02);
-	else
-		pr_err("%s not PHY-based or SerDes, implement DAC!\n", __func__);
+	/* assume this is equivalent with (PHY_TYPE == SERDES && MEDIA == FIBER_10G) for now */
+	if (hw_mode == RTPCS_SDS_MODE_10GBASER) {
+		rtpcs_sds_write_bits(sds, 0x2e, 0x03, 13, 8, 0x1f);
+		rtpcs_sds_write_bits(sds, 0x2e, 0x00, 13, 13, 0x01);
+		rtpcs_sds_write_bits(sds, 0x2e, 0x16, 14, 8, 0x00);	/* REG0_FILTER_OUT */
+	}
 
-	/* No serdes, check for Aquantia PHYs */
-	rtpcs_sds_write_bits(sds, 0x2e, 0x16,  3,  2, 0x02);
-
+	/* REG0_LEQ_DC_GAIN */
+	rtpcs_sds_write_bits(sds, 0x2e, 0x16,  3,  2, 0x02); /* REG0_LEQ_DC_GAIN, 0x01 for short DACs */
 	rtpcs_sds_write_bits(sds, 0x2e, 0x0f,  6,  0, 0x5f);
 	rtpcs_sds_write_bits(sds, 0x2f, 0x05,  7,  2, 0x1f);
 	rtpcs_sds_write_bits(sds, 0x2e, 0x19,  9,  5, 0x1f);
@@ -2208,33 +2261,26 @@ static void rtpcs_930x_sds_do_rx_calibration_2_3(struct rtpcs_serdes *sds)
 
 	pr_info("start_1.2.3 Foreground Calibration\n");
 
-	while (1) {
-		if (sds == even_sds)
-			rtpcs_sds_write(sds, 0x1f, 0x2, 0x2f);
-		else
-			rtpcs_sds_write(even_sds, 0x1f, 0x2, 0x31);
+	for (int run = 0; run < 10; run++) {
+		/* REG_DBGO_SEL */
+		rtpcs_sds_write(even_sds, 0x1f, 0x2, (sds == even_sds) ? 0x2f : 0x31);
+		rtpcs_sds_write_bits(sds, 0x2e, 0x15, 9, 9, 0x1);	/* REG0_RX_EN_TEST */
+		rtpcs_sds_write_bits(sds, 0x21, 0x06, 11, 6, 0x20);	/* REG0_RX_DEBUG_SEL */
 
-		/* ##Page0x2E, Reg0x15[9], REG0_RX_EN_TEST=[1] */
-		rtpcs_sds_write_bits(sds, 0x2e, 0x15, 9, 9, 0x1);
-		/* ##Page0x21, Reg0x06[11 6], REG0_RX_DEBUG_SEL=[1 0 x x x x] */
-		rtpcs_sds_write_bits(sds, 0x21, 0x06, 11, 6, 0x20);
-		/* ##Page0x2F, Reg0x0C[5 0], REG0_COEF_SEL=[0 0 1 1 1 1] */
-		rtpcs_sds_write_bits(sds, 0x2f, 0x0c, 5, 0, 0xf);
+		rtpcs_sds_write_bits(sds, 0x2f, 0x0c, 5, 0, 0xf);	/* REG0_COEF_SEL */
 		/* ##FGCAL read gray */
 		fgcal_gray = rtpcs_sds_read_bits(sds, 0x1f, 0x14, 5, 0);
-		/* ##Page0x2F, Reg0x0C[5 0], REG0_COEF_SEL=[0 0 1 1 1 0] */
-		rtpcs_sds_write_bits(sds, 0x2f, 0x0c, 5, 0, 0xe);
+		rtpcs_sds_write_bits(sds, 0x2f, 0x0c, 5, 0, 0xe);	/* REG0_COEF_SEL */
 		/* ##FGCAL read binary */
 		fgcal_binary = rtpcs_sds_read_bits(sds, 0x1f, 0x14, 5, 0);
-
-		pr_info("%s: fgcal_gray: %d, fgcal_binary %d\n",
-			__func__, fgcal_gray, fgcal_binary);
-
-		offset_range = rtpcs_sds_read_bits(sds, 0x2e, 0x15, 15, 14);
 
 		if (fgcal_binary <= 60 && fgcal_binary >= 3)
 			break;
 
+		pr_info("%s: fgcal_gray = %d, fgcal_binary = %d\n", __func__, fgcal_gray,
+			fgcal_binary);
+
+		offset_range = rtpcs_sds_read_bits(sds, 0x2e, 0x15, 15, 14);
 		if (offset_range == 3) {
 			pr_info("%s: Foreground Calibration result marginal!", __func__);
 			break;
@@ -2441,8 +2487,8 @@ static void rtpcs_930x_sds_do_rx_calibration(struct rtpcs_serdes *sds,
 	rtpcs_930x_sds_do_rx_calibration_5(sds, hw_mode);
 	mdelay(20);
 
-	/* Do this only for 10GR mode, SDS active in mode 0x1a */
-	if (rtpcs_sds_read_bits(sds, 0x1f, 9, 11, 7) == RTPCS_930X_SDS_MODE_10GBASER) {
+	/* Do this only for 10GR mode */
+	if (hw_mode == RTPCS_SDS_MODE_10GBASER) {
 		pr_info("%s: SDS enabled\n", __func__);
 		latch_sts = rtpcs_sds_read_bits(sds, 0x4, 1, 2, 2);
 		mdelay(1);
@@ -2510,8 +2556,8 @@ static u32 rtpcs_930x_sds_sym_err_get(struct rtpcs_serdes *sds,
 	switch (hw_mode) {
 	case RTPCS_SDS_MODE_QSGMII:
 	case RTPCS_SDS_MODE_XSGMII:
-		v = rtpcs_sds_read_bits(sds, 0x1, 0x1, 15, 8) << 16;
-		v |= rtpcs_sds_read_bits(sds, 0x1, 0x0, 15, 0);
+		v = rtpcs_sds_read_bits(sds, 0x1, 0x1, 15, 8) << 16;	/* ALL_SYMBOLERR_CNT_NEW_23_16 */
+		v |= rtpcs_sds_read_bits(sds, 0x1, 0x0, 15, 0);		/* ALL_SYMBOLERR_CNT_NEW_15_0 */
 		break;
 
 	case RTPCS_SDS_MODE_USXGMII_10GQXGMII:
@@ -2522,10 +2568,14 @@ static u32 rtpcs_930x_sds_sym_err_get(struct rtpcs_serdes *sds,
 	case RTPCS_SDS_MODE_10GBASER:
 	case RTPCS_SDS_MODE_USXGMII_10GSXGMII:
 		v = rtpcs_sds_read(sds, 0x5, 0x1);
-		return v & 0xff;
+		v &= 0xff;
+		break;
 
 	default:
-		pr_info("%s unsupported PHY-mode\n", __func__);
+		rtpcs_sds_write_bits(sds, 0x1, 24, 2, 0, 0);
+
+		v = rtpcs_sds_read_bits(sds, 0x1, 0x3, 15, 8) << 16;	/* MUX_SYMBOLERR_CNT_NEW_23_16 */
+		v |= rtpcs_sds_read_bits(sds, 0x1, 0x2, 15, 0);		/* MUX_SYMBOLERR_CNT_NEW_15_0 */
 	}
 
 	return v;
@@ -2545,8 +2595,6 @@ static int rtpcs_930x_sds_check_calibration(struct rtpcs_serdes *sds,
 	errors2 = rtpcs_930x_sds_sym_err_get(sds, hw_mode);
 
 	switch (hw_mode) {
-	case RTPCS_SDS_MODE_1000BASEX:
-	case RTPCS_SDS_MODE_SGMII:
 	case RTPCS_SDS_MODE_XSGMII:
 		if ((errors2 - errors1 > 100) ||
 		    (errors1 >= 0xffff00) || (errors2 >= 0xffff00)) {
@@ -2554,16 +2602,12 @@ static int rtpcs_930x_sds_check_calibration(struct rtpcs_serdes *sds,
 			return 1;
 		}
 		break;
-	case RTPCS_SDS_MODE_10GBASER:
-	case RTPCS_SDS_MODE_USXGMII_10GSXGMII:
-	case RTPCS_SDS_MODE_USXGMII_10GQXGMII:
+	default:
 		if (errors2 > 0) {
-			pr_info("%s: 10G error rate too high\n", __func__);
+			pr_info("%s: symbol error rate too high\n", __func__);
 			return 1;
 		}
 		break;
-	default:
-		return 1;
 	}
 
 	return 0;
@@ -2599,26 +2643,27 @@ static void rtpcs_930x_phy_enable_10g_1g(struct rtpcs_serdes *sds)
 static int rtpcs_930x_sds_10g_idle(struct rtpcs_serdes *sds)
 {
 	struct rtpcs_serdes *even_sds = rtpcs_sds_get_even(sds);
-	bool busy;
-	int i = 0;
+	ktime_t timeout;
+	int bit, busy;
+
+	bit = (sds == even_sds) ? 0 : 1;
+	timeout = ktime_add_us(ktime_get(), 10000); /* timeout after 10 msecs */
 
 	do {
-		if (sds == even_sds) {
-			rtpcs_sds_write_bits(sds, 0x1f, 0x2, 15, 0, 53);
-			busy = !!rtpcs_sds_read_bits(sds, 0x1f, 0x14, 0, 0);
-		} else {
-			rtpcs_sds_write_bits(even_sds, 0x1f, 0x2, 15, 0, 53);
-			busy = !!rtpcs_sds_read_bits(even_sds, 0x1f, 0x14, 1, 1);
-		}
-		i++;
-	} while (busy && i < 100);
+		rtpcs_sds_write(even_sds, 0x1f, 0x2, 53);
+		busy = rtpcs_sds_read_bits(even_sds, 0x1f, 0x14, bit, bit);
+		if (busy < 0)
+			return busy;
 
-	if (i < 100)
-		return 0;
+		if (!busy)
+			return 0;
 
-	pr_warn("%s WARNING: Waiting for RX idle timed out, SDS %d\n",
+		usleep_range(100, 200); /* wait ~100 usecs before retry */
+	} while (ktime_before(ktime_get(), timeout));
+
+	pr_warn("%s: WARNING Waiting for RX idle timed out, SDS %d\n",
 		__func__, sds->id);
-	return -EIO;
+	return -ETIMEDOUT;
 }
 
 static int rtpcs_930x_sds_set_polarity(struct rtpcs_serdes *sds,
@@ -3324,113 +3369,113 @@ static int rtpcs_931x_sds_cmu_page_get(enum rtpcs_sds_mode hw_mode)
 {
 	switch (hw_mode) {
 	case RTPCS_SDS_MODE_SGMII:
-	case RTPCS_SDS_MODE_1000BASEX:		/* MII_1000BX_FIBER / 100BX_FIBER / 1000BX100BX_AUTO */
-		return 0x24;
-	case RTPCS_SDS_MODE_2500BASEX:		/* MII_2500Base_X: */
-		return 0x28;
-/*	case MII_HISGMII_5G: */
-/*		return 0x2a; */
+	case RTPCS_SDS_MODE_1000BASEX:
+		return 0x24;			/* ANA_1G */
+	case RTPCS_SDS_MODE_2500BASEX:
+		return 0x28;			/* ANA_3G */
 	case RTPCS_SDS_MODE_QSGMII:
-		return 0x2a;			/* Code also has 0x34 */
-/*	case MII_RXAUI_LITE: */
-/*		return 0x2c; */
-	case RTPCS_SDS_MODE_XSGMII:		/* MII_XSGMII */
-	case RTPCS_SDS_MODE_10GBASER:		/* MII_10GR */
-		return 0x2e;
-	default:
-		return -EINVAL;
-	}
-}
-
-static int rtpcs_931x_sds_config_cmu(struct rtpcs_serdes *sds, enum rtpcs_sds_mode hw_mode)
-{
-	struct rtpcs_serdes *even_sds = rtpcs_sds_get_even(sds);
-	u32 force_lc_mode_bit, force_lc_mode_val_bit;
-	enum rtpcs_sds_pll_type pll_type; /* SDK calls this cmu_type */
-	bool force_pll_spd;
-	int cmu_page = 0;
-
-	switch (hw_mode) {
-	case RTPCS_SDS_MODE_OFF:
+		return 0x2a;			/* ANA_5G/6G */
+	//	return 0x34;
 	case RTPCS_SDS_MODE_XSGMII:
-	case RTPCS_SDS_MODE_10GBASER:
 	case RTPCS_SDS_MODE_USXGMII_10GSXGMII:
 	case RTPCS_SDS_MODE_USXGMII_10GDXGMII:
 	case RTPCS_SDS_MODE_USXGMII_10GQXGMII:
 	case RTPCS_SDS_MODE_USXGMII_5GSXGMII:
 	case RTPCS_SDS_MODE_USXGMII_5GDXGMII:
 	case RTPCS_SDS_MODE_USXGMII_2_5GSXGMII:
-		return 0;
-
-	case RTPCS_SDS_MODE_QSGMII:
-		pll_type = RTPCS_SDS_PLL_RING;
-		force_pll_spd = false;
-		break;
-
-	case RTPCS_SDS_MODE_1000BASEX:
-		pll_type = RTPCS_SDS_PLL_RING;
-		force_pll_spd = false;
-		break;
-
-/*	case MII_1000BX100BX_AUTO:
-		pll_type = RTPCS_SDS_PLL_RING;
-		force_pll_spd = false;
-		break; */
-
-	case RTPCS_SDS_MODE_SGMII:
-		pll_type = RTPCS_SDS_PLL_RING;
-		force_pll_spd = false;
-		break;
-
-	case RTPCS_SDS_MODE_2500BASEX:
-		pll_type = RTPCS_SDS_PLL_RING;
-		force_pll_spd = true;
-		break;
-
+	case RTPCS_SDS_MODE_10GBASER:
+		return 0x2e;			/* ANA_10G */
 	default:
-		pr_info("SerDes %d mode is invalid\n", sds->id);
-		return -EINVAL;
+		return -ENOTSUPP;
 	}
+}
+
+static int rtpcs_931x_sds_get_pll_select(struct rtpcs_serdes *sds, enum rtpcs_sds_pll_type *pll)
+{
+	int cmu_page, pll_sel;
+
+	cmu_page = rtpcs_931x_sds_cmu_page_get(sds->hw_mode);
+	if (cmu_page < 0)
+		return cmu_page;
+
+	pll_sel = rtpcs_sds_read_bits(sds, cmu_page, 0x7, 15, 15);
+	if (pll_sel < 0)
+		return pll_sel;
+
+	*pll = (enum rtpcs_sds_pll_type)pll_sel;
+	return 0;
+}
+
+static int rtpcs_931x_sds_set_pll_select(struct rtpcs_serdes *sds, enum rtpcs_sds_mode hw_mode,
+					 enum rtpcs_sds_pll_type pll)
+{
+	struct rtpcs_serdes *even_sds = rtpcs_sds_get_even(sds);
+	int cmu_page, ret, val;
+	int frc_lc_mode_bit;
 
 	cmu_page = rtpcs_931x_sds_cmu_page_get(hw_mode);
 	if (cmu_page < 0)
-		return -EINVAL;
+		return cmu_page;
 
-	if (sds == even_sds) { 
-		force_lc_mode_bit = 4;
-		force_lc_mode_val_bit = 5;
-	} else {
-		force_lc_mode_bit = 6;
-		force_lc_mode_val_bit = 7;
-	}
+	/*
+	 * bits [5:4] (even) / [7:6] (odd) are used by RTL930x as selector. The selector
+	 * for RTL931x SerDes is in the CMU page of each SerDes, depending on the hardware
+	 * mode.
+	 *
+	 * Here, the SDK calls them 'frc_lc_mode' and 'frc_lc_mode_val'. However, they don't
+	 * seem to have any effect and thus their purpose is unknown. So just set them as
+	 * the SDK does.
+	 */
+	val = (pll == RTPCS_SDS_PLL_TYPE_LC) ? 0x3 : 0x1;
+	frc_lc_mode_bit = (sds == even_sds) ? 4 : 6;
+	ret = rtpcs_sds_write_bits(even_sds, 0x20, 0x12, frc_lc_mode_bit + 1,
+				   frc_lc_mode_bit, val);
+	if (ret < 0)
+		return ret;
 
-	pr_info("%s: pll_type %s cmu_page %x force_pll_spd %d even_sds %d sds %d\n",
-		__func__, pll_type == RTPCS_SDS_PLL_LC ? "LC" : "ring", cmu_page, force_pll_spd,
-		even_sds->id, sds->id);
+	return rtpcs_sds_write_bits(sds, cmu_page, 0x7, 15, 15, pll);
+}
 
-	if (pll_type == RTPCS_SDS_PLL_RING) {
-		rtpcs_sds_write_bits(sds, cmu_page, 0x7, 15, 15, 0x0);
+static int rtpcs_931x_sds_reconfigure_to_pll(struct rtpcs_serdes *sds, enum rtpcs_sds_pll_type pll)
+{
+	enum rtpcs_sds_pll_type tmp_pll;
+	enum rtpcs_sds_pll_speed speed;
+	enum rtpcs_sds_mode tmp_mode;
+	int ret;
 
-		rtpcs_sds_write_bits(even_sds, 0x20, 0x12, 3, 2, 0x3);
-		rtpcs_sds_write_bits(even_sds, 0x20, 0x12, force_lc_mode_bit,
-				     force_lc_mode_bit, 0x1);
-		rtpcs_sds_write_bits(even_sds, 0x20, 0x12, force_lc_mode_val_bit,
-				     force_lc_mode_val_bit, 0x0);
-		rtpcs_sds_write_bits(even_sds, 0x20, 0x12, 12, 12, 0x1);
-		rtpcs_sds_write_bits(even_sds, 0x20, 0x12, 15, 13, force_pll_spd ? 0x1 : 0x0);
-	} else if (pll_type == RTPCS_SDS_PLL_LC) {
-		rtpcs_sds_write_bits(sds, cmu_page, 0x7, 15, 15, 0x1);
+	/* assume we always reconfigure to the other PLL */
+	tmp_pll = (pll == RTPCS_SDS_PLL_TYPE_LC) ? RTPCS_SDS_PLL_TYPE_RING : RTPCS_SDS_PLL_TYPE_LC;
 
-		rtpcs_sds_write_bits(even_sds, 0x20, 0x12, 1, 0, 0x3);
-		rtpcs_sds_write_bits(even_sds, 0x20, 0x12, force_lc_mode_bit,
-				     force_lc_mode_bit, 0x1);
-		rtpcs_sds_write_bits(even_sds, 0x20, 0x12, force_lc_mode_val_bit,
-				     force_lc_mode_val_bit, 0x1);
-		rtpcs_sds_write_bits(even_sds, 0x20, 0x12, 8, 8, 0x1);
-		rtpcs_sds_write_bits(even_sds, 0x20, 0x12, 11, 9, force_pll_spd ? 0x1 : 0x0);
-	}
+	ret = rtpcs_93xx_sds_get_pll_config(sds, tmp_pll, &speed);
+	if (ret < 0)
+		return ret;
 
-	return 0;
+	tmp_mode = sds->hw_mode;
+
+	/* turn off SerDes for reconfiguration */
+	ret = rtpcs_931x_sds_power(sds, false);
+	if (ret < 0)
+		return ret;
+
+	ret = rtpcs_931x_sds_set_mode(sds, RTPCS_SDS_MODE_OFF);
+	if (ret < 0)
+		return ret;
+
+	/* reconfigure to other PLL */
+	ret = rtpcs_93xx_sds_set_pll_config(sds, pll, speed);
+	if (ret < 0)
+		return ret;
+
+	ret = rtpcs_931x_sds_set_pll_select(sds, sds->hw_mode, pll);
+	if (ret < 0)
+		return ret;
+
+	/* turn on SerDes again */
+	ret = rtpcs_931x_sds_set_mode(sds, tmp_mode);
+	if (ret < 0)
+		return ret;
+
+	return rtpcs_931x_sds_power(sds, true);
 }
 
 static int rtpcs_931x_sds_cmu_band_set(struct rtpcs_serdes *sds,
@@ -3759,7 +3804,7 @@ static int rtpcs_931x_setup_serdes(struct rtpcs_serdes *sds,
 	if (ret < 0)
 		return ret;
 
-	ret = rtpcs_931x_sds_config_cmu(sds, hw_mode);
+	ret = rtpcs_93xx_sds_config_cmu(sds, hw_mode);
 	if (ret < 0)
 		return ret;
 
@@ -4204,6 +4249,10 @@ static const struct rtpcs_serdes_ops rtpcs_930x_sds_ops = {
 	.xsg_write		= rtpcs_930x_sds_op_xsg_write,
 	.set_autoneg		= rtpcs_93xx_sds_set_autoneg,
 	.restart_autoneg	= rtpcs_generic_sds_restart_autoneg,
+	.get_pll_select		= rtpcs_930x_sds_get_pll_select,
+	.set_pll_select		= rtpcs_930x_sds_set_pll_select,
+	.reset_cmu		= rtpcs_930x_sds_reset_cmu,
+	.reconfigure_to_pll	= rtpcs_930x_sds_reconfigure_to_pll,
 };
 
 static const struct rtpcs_sds_regs rtpcs_930x_sds_regs = {
@@ -4240,6 +4289,9 @@ static const struct rtpcs_serdes_ops rtpcs_931x_sds_ops = {
 	.xsg_write		= rtpcs_931x_sds_op_xsg_write,
 	.set_autoneg		= rtpcs_93xx_sds_set_autoneg,
 	.restart_autoneg	= rtpcs_generic_sds_restart_autoneg,
+	.get_pll_select		= rtpcs_931x_sds_get_pll_select,
+	.set_pll_select		= rtpcs_931x_sds_set_pll_select,
+	.reconfigure_to_pll	= rtpcs_931x_sds_reconfigure_to_pll,
 };
 
 static const struct rtpcs_sds_regs rtpcs_931x_sds_regs = {
