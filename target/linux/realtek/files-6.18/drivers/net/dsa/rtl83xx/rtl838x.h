@@ -292,8 +292,10 @@
 #define MV_ACT_TRAP2CPU				2
 #define MV_ACT_COPY2CPU				3
 
+#define RTL838X_VLAN_STP_CTRL			(0x3b20)
+#define RTL839X_ST_CTRL				(0x27e4)
 #define RTL930X_ST_CTRL				(0x8798)
-#define RTL931x_ST_CTRL				(0x8000)
+#define RTL931X_ST_CTRL				(0x8000)
 
 #define RTL930X_L2_PORT_SABLK_CTRL		(0x905c)
 #define RTL930X_L2_PORT_DABLK_CTRL		(0x9060)
@@ -896,15 +898,6 @@ typedef enum {
  */
 #define RTLDSA_COUNTERS_FAST_POLL_INTERVAL	(3 * HZ)
 
-enum phy_type {
-	PHY_NONE = 0,
-	PHY_RTL838X_SDS = 1,
-	PHY_RTL8218B_INT = 2,
-	PHY_RTL8218B_EXT = 3,
-	PHY_RTL8214FC = 4,
-	PHY_RTL839X_SDS = 5,
-};
-
 enum pbvlan_type {
 	PBVLAN_TYPE_INNER = 0,
 	PBVLAN_TYPE_OUTER,
@@ -1003,14 +996,13 @@ struct rtldsa_93xx_lag_entry {
 
 struct rtldsa_port {
 	bool enable:1;
-	bool phy_is_integrated:1;
+	bool phy:1;
 	bool isolated:1;
 	bool rate_police_egress:1;
 	bool rate_police_ingress:1;
 	u64 pm;
 	u16 pvid;
 	bool eee_enabled;
-	enum phy_type phy;
 	struct phylink_pcs *pcs;
 	int led_set;
 	int leds_on_this_port;
@@ -1378,6 +1370,8 @@ struct rtldsa_mirror_config {
 };
 
 struct rtldsa_config {
+	const struct dsa_switch_ops *switch_ops;
+	const struct phylink_mac_ops *phylink_mac_ops;
 	void (*mask_port_reg_be)(u64 clear, u64 set, int reg);
 	void (*set_port_reg_be)(u64 set, int reg);
 	u64 (*get_port_reg_be)(int reg);
@@ -1422,9 +1416,15 @@ struct rtldsa_config {
 	int imr_glb;
 	int n_counters;
 	int n_pie_blocks;
+	u8 num_lag_ids;
+	u8 cpu_port;
 	u8 port_ignore;
+	u8 l2_bucket_size;
+	u16 n_mst;
+	u32 fib_entries;
 	int trk_ctrl;
 	int trk_hash_ctrl;
+	int spanning_tree_ctrl;
 	void (*vlan_tables_read)(u32 vlan, struct rtl838x_vlan_info *info);
 	void (*vlan_set_tagged)(u32 vlan, struct rtl838x_vlan_info *info);
 	void (*vlan_set_untagged)(u32 vlan, u64 portmask);
@@ -1516,22 +1516,14 @@ struct rtl838x_switch_priv {
 	/* Switch operation */
 	struct dsa_switch *ds;
 	struct device *dev;
-	u16 id;
 	u16 family_id;
 	struct rtldsa_port ports[57];
 	struct mutex reg_mutex;		/* Mutex for individual register manipulations */
 	struct mutex pie_mutex;		/* Mutex for Packet Inspection Engine */
 	int link_state_irq;
 	int mirror_group_ports[4];
-	struct mii_bus *parent_bus;
 	const struct rtldsa_config *r;
-	u8 cpu_port;
-	u8 port_mask;
-	u8 port_width;
 	u64 irq_mask;
-	u32 fib_entries;
-	int l2_bucket_size;
-	u16 n_mst;
 	struct dentry *dbgfs_dir;
 
 	/** @lags_port_members: Port (bit) is part of a specific LAG */

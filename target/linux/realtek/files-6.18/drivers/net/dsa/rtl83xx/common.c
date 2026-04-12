@@ -24,7 +24,7 @@ int rtldsa_port_get_stp_state(struct rtl838x_switch_priv *priv, int port)
 	u32 msti = 0;
 	int state;
 
-	if (port >= priv->cpu_port)
+	if (port >= priv->r->cpu_port)
 		return -EINVAL;
 
 	mutex_lock(&priv->reg_mutex);
@@ -211,72 +211,27 @@ u64 rtl839x_get_port_reg_le(int reg)
 	return v;
 }
 
-static int rtldsa_bus_read(struct mii_bus *bus, int addr, int regnum)
-{
-	struct rtl838x_switch_priv *priv = bus->priv;
-
-	return mdiobus_read_nested(priv->parent_bus, addr, regnum);
-}
-
-static int rtldsa_bus_write(struct mii_bus *bus, int addr, int regnum, u16 val)
-{
-	struct rtl838x_switch_priv *priv = bus->priv;
-
-	return mdiobus_write_nested(priv->parent_bus, addr, regnum, val);
-}
-
-static int rtldsa_bus_c45_read(struct mii_bus *bus, int addr, int devad, int regnum)
-{
-	struct rtl838x_switch_priv *priv = bus->priv;
-
-	return mdiobus_c45_read_nested(priv->parent_bus, addr, devad, regnum);
-}
-
-static int rtldsa_bus_c45_write(struct mii_bus *bus, int addr, int devad, int regnum, u16 val)
-{
-	struct rtl838x_switch_priv *priv = bus->priv;
-
-	return mdiobus_c45_write_nested(priv->parent_bus, addr, devad, regnum, val);
-}
-
 static int rtl83xx_mdio_probe(struct rtl838x_switch_priv *priv)
 {
 	struct device_node *dn, *phy_node, *pcs_node, *led_node;
-	struct device *dev = priv->dev;
-	struct mii_bus *bus;
-	int ret;
 	u32 pn;
 
+	/* Check if all busses of Realtek mdio controller are registered */
 	dn = of_find_compatible_node(NULL, NULL, "realtek,otto-mdio");
-	if (!dn)
+	if (!of_device_is_available(dn)) {
+		of_node_put(dn);
 		return -ENODEV;
+	}
 
-	if (!of_device_is_available(dn))
-		ret = -ENODEV;
-
-	priv->parent_bus = of_mdio_find_bus(dn);
-	if (!priv->parent_bus)
-		return -EPROBE_DEFER;
-
-	bus = devm_mdiobus_alloc(priv->ds->dev);
-	if (!bus)
-		return -ENOMEM;
-
-	bus->name = "rtldsa_mdio";
-	bus->read = rtldsa_bus_read;
-	bus->write = rtldsa_bus_write;
-	bus->read_c45 = rtldsa_bus_c45_read;
-	bus->write_c45 = rtldsa_bus_c45_write;
-	bus->phy_mask = priv->parent_bus->phy_mask;
-	snprintf(bus->id, MII_BUS_ID_SIZE, "%s-%d", bus->name, dev->id);
-
-	bus->parent = dev;
-	priv->ds->user_mii_bus = bus;
-	priv->ds->user_mii_bus->priv = priv;
-
-	ret = mdiobus_register(priv->ds->user_mii_bus);
-	if (ret)
-		return ret;
+	for_each_child_of_node_scoped(dn, bn) {
+		struct mii_bus *bus = of_mdio_find_bus(bn);
+		if (!bus) {
+			of_node_put(dn);
+			return -EPROBE_DEFER;
+		}
+		put_device(&bus->dev);
+	}
+	of_node_put(dn);
 
 	dn = of_find_compatible_node(NULL, NULL, "realtek,otto-switch");
 	if (!dn) {
@@ -298,7 +253,7 @@ static int rtl83xx_mdio_probe(struct rtl838x_switch_priv *priv)
 
 		pcs_node = of_parse_phandle(dn, "pcs-handle", 0);
 		phy_node = of_parse_phandle(dn, "phy-handle", 0);
-		if (pn != priv->cpu_port && !phy_node && !pcs_node) {
+		if (pn != priv->r->cpu_port && !phy_node && !pcs_node) {
 			dev_err(priv->dev, "Port node %d has neither pcs-handle nor phy-handle\n", pn);
 			continue;
 		}
@@ -327,30 +282,7 @@ static int rtl83xx_mdio_probe(struct rtl838x_switch_priv *priv)
 			}
 		}
 
-		if (!phy_node) {
-			if (priv->ports[pn].pcs)
-				priv->ports[pn].phy_is_integrated = true;
-
-			continue;
-		}
-
-		if (of_property_read_bool(phy_node, "phy-is-integrated") &&
-		    !of_property_read_bool(phy_node, "sfp")) {
-			priv->ports[pn].phy = PHY_RTL8218B_INT;
-			continue;
-		}
-
-		if (!of_property_read_bool(phy_node, "phy-is-integrated") &&
-		    of_property_read_bool(phy_node, "sfp")) {
-			priv->ports[pn].phy = PHY_RTL8214FC;
-			continue;
-		}
-
-		if (!of_property_read_bool(phy_node, "phy-is-integrated") &&
-		    !of_property_read_bool(phy_node, "sfp")) {
-			priv->ports[pn].phy = PHY_RTL8218B_EXT;
-			continue;
-		}
+		priv->ports[pn].phy = !!phy_node;
 	}
 
 	/* Disable MAC polling the PHY so that we can start configuration */
@@ -749,7 +681,7 @@ static int rtl83xx_l2_nexthop_add(struct rtl838x_switch_priv *priv, struct rtl83
 	e.port = nh->port;
 
 	/* Loop over all entries in the hash-bucket and over the second block on 93xx SoCs */
-	for (int i = 0; i < priv->l2_bucket_size; i++) {
+	for (int i = 0; i < priv->r->l2_bucket_size; i++) {
 		entry = priv->r->read_l2_entry_using_hash(key, i, &e);
 
 		if (!e.valid || ((entry & 0x0fffffffffffffffULL) == seed)) {
@@ -836,7 +768,7 @@ int rtl83xx_port_is_under(const struct net_device *dev, struct rtl838x_switch_pr
 	 * }
 	 */
 
-	for (int i = 0; i < priv->cpu_port; i++) {
+	for (int i = 0; i < priv->r->cpu_port; i++) {
 		if (!priv->ports[i].dp)
 			continue;
 		if (priv->ports[i].dp->user == dev)
@@ -1543,7 +1475,7 @@ static irqreturn_t rtldsa_switch_irq(int irq, void *dev_id)
 	link = priv->r->get_port_reg_le(priv->r->mac_link_sts);
 	link = priv->r->get_port_reg_le(priv->r->mac_link_sts);
 
-	for (int port = 0; port < priv->cpu_port; port++)
+	for (int port = 0; port < priv->r->cpu_port; port++)
 		if (ports & BIT_ULL(port))
 			dsa_port_phylink_mac_change(ds, port, link & BIT_ULL(port));
 
@@ -1607,14 +1539,20 @@ static int rtl83xx_sw_probe(struct platform_device *pdev)
 	if (!priv)
 		return -ENOMEM;
 
-	priv->ds = devm_kzalloc(dev, sizeof(*priv->ds), GFP_KERNEL);
+	priv->r = device_get_match_data(&pdev->dev);
 
+	priv->ds = devm_kzalloc(dev, sizeof(*priv->ds), GFP_KERNEL);
 	if (!priv->ds)
 		return -ENOMEM;
+
 	priv->ds->dev = dev;
 	priv->ds->priv = priv;
-	priv->ds->ops = &rtldsa_83xx_switch_ops;
 	priv->ds->needs_standalone_vlan_filtering = true;
+	priv->ds->ops = priv->r->switch_ops;
+	priv->ds->phylink_mac_ops = priv->r->phylink_mac_ops;
+	priv->ds->num_lag_ids = priv->r->num_lag_ids;
+	priv->ds->num_ports = priv->r->cpu_port + 1;
+
 	priv->dev = dev;
 	dev_set_drvdata(dev, priv);
 
@@ -1626,59 +1564,9 @@ static int rtl83xx_sw_probe(struct platform_device *pdev)
 	if (err)
 		return err;
 
-	priv->r = device_get_match_data(&pdev->dev);
 	priv->family_id = soc_info.family;
-	priv->id = soc_info.id;
-	switch (soc_info.family) {
-	case RTL8380_FAMILY_ID:
-		priv->ds->ops = &rtldsa_83xx_switch_ops;
-		priv->ds->phylink_mac_ops = &rtldsa_83xx_phylink_mac_ops;
-		priv->cpu_port = RTL838X_CPU_PORT;
-		priv->port_mask = 0x1f;
-		priv->port_width = 1;
-		priv->fib_entries = 8192;
-		priv->ds->num_lag_ids = 8;
-		priv->l2_bucket_size = 4;
-		priv->n_mst = 64;
-		break;
-	case RTL8390_FAMILY_ID:
-		priv->ds->ops = &rtldsa_83xx_switch_ops;
-		priv->ds->phylink_mac_ops = &rtldsa_83xx_phylink_mac_ops;
-		priv->cpu_port = RTL839X_CPU_PORT;
-		priv->port_mask = 0x3f;
-		priv->port_width = 2;
-		priv->fib_entries = 16384;
-		priv->ds->num_lag_ids = 16;
-		priv->l2_bucket_size = 4;
-		priv->n_mst = 256;
-		break;
-	case RTL9300_FAMILY_ID:
-		priv->ds->ops = &rtldsa_93xx_switch_ops;
-		priv->ds->phylink_mac_ops = &rtldsa_93xx_phylink_mac_ops;
-		priv->cpu_port = RTL930X_CPU_PORT;
-		priv->port_mask = 0x1f;
-		priv->port_width = 1;
-		priv->fib_entries = 16384;
-		priv->ds->num_lag_ids = 16;
-		sw_w32(0, RTL930X_ST_CTRL);
-		priv->l2_bucket_size = 8;
-		priv->n_mst = 64;
-		break;
-	case RTL9310_FAMILY_ID:
-		priv->ds->ops = &rtldsa_93xx_switch_ops;
-		priv->ds->phylink_mac_ops = &rtldsa_93xx_phylink_mac_ops;
-		priv->cpu_port = RTL931X_CPU_PORT;
-		priv->port_mask = 0x3f;
-		priv->port_width = 2;
-		priv->fib_entries = 16384;
-		priv->ds->num_lag_ids = 16;
-		sw_w32(0, RTL931x_ST_CTRL);
-		priv->l2_bucket_size = 8;
-		priv->n_mst = 128;
-		break;
-	}
-	priv->ds->num_ports = priv->cpu_port + 1;
-	priv->irq_mask = GENMASK_ULL(priv->cpu_port - 1, 0);
+	sw_w32(0, priv->r->spanning_tree_ctrl);
+	priv->irq_mask = GENMASK_ULL(priv->r->cpu_port - 1, 0);
 
 	err = rtl83xx_mdio_probe(priv);
 	if (err) {
@@ -1689,7 +1577,7 @@ static int rtl83xx_sw_probe(struct platform_device *pdev)
 	}
 
 	priv->msts = devm_kcalloc(priv->dev,
-				  priv->n_mst - 1, sizeof(struct rtldsa_mst),
+				  priv->r->n_mst - 1, sizeof(struct rtldsa_mst),
 				  GFP_KERNEL);
 	if (!priv->msts)
 		return -ENOMEM;
@@ -1710,7 +1598,7 @@ static int rtl83xx_sw_probe(struct platform_device *pdev)
 	 * dsa_switch_tree, the tree is built when the switch
 	 * is registered by dsa_register_switch
 	 */
-	for (int i = 0; i <= priv->cpu_port; i++)
+	for (int i = 0; i <= priv->r->cpu_port; i++)
 		priv->ports[i].dp = dsa_to_port(priv->ds, i);
 
 	/* Enable link and media change interrupts. Are the SERDES masks needed? */
