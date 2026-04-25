@@ -700,7 +700,6 @@ endef
 
 define KernelPackage/dwmac-motorcomm/description
   Supports the Motorcomm DWMAC-based PCI Ethernet controllers.
-  Currently only YT6801 is supported.
 endef
 
 $(eval $(call KernelPackage,dwmac-motorcomm))
@@ -2499,6 +2498,7 @@ define KernelPackage/mtk-t7xx/description
 endef
 
 $(eval $(call KernelPackage,mtk-t7xx))
+
 
 define KernelPackage/atlantic
   SUBMENU:=$(NETWORK_DEVICES_MENU)
