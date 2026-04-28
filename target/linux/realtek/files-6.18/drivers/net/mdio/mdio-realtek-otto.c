@@ -29,7 +29,7 @@
 #define RTMDIO_PHY_MAC_1G			3
 #define RTMDIO_PHY_MAC_2G_PLUS			1
 
-#define RTMDIO_PHY_POLL_MMD(dev, reg, bit)	((bit << 21) | (dev << 16) | reg)
+#define RTMDIO_PHY_POLL_MMD(dev, reg, bit)	((bit << 21) | (dev << 16) | (reg))
 
 /* MDIO bus registers/fields */
 #define RTMDIO_RUN				BIT(0)
@@ -42,7 +42,7 @@
 #define   RTMDIO_838X_CMD_READ_C22		0
 #define   RTMDIO_838X_CMD_READ_C45		BIT(1)
 #define   RTMDIO_838X_CMD_WRITE_C22		BIT(2)
-#define   RTMDIO_838X_CMD_WRITE_C45		BIT(1) | BIT(2)
+#define   RTMDIO_838X_CMD_WRITE_C45		(BIT(1) | BIT(2))
 #define   RTMDIO_838X_CMD_MASK			GENMASK(2, 0)
 #define RTMDIO_838X_SMI_ACCESS_PHY_CTRL_2	(0xa1c0)
 #define RTMDIO_838X_SMI_ACCESS_PHY_CTRL_3	(0xa1c4)
@@ -56,7 +56,7 @@
 #define   RTMDIO_839X_CMD_READ_C22		0
 #define   RTMDIO_839X_CMD_READ_C45		BIT(2)
 #define   RTMDIO_839X_CMD_WRITE_C22		BIT(3)
-#define   RTMDIO_839X_CMD_WRITE_C45		BIT(2) | BIT(3)
+#define   RTMDIO_839X_CMD_WRITE_C45		(BIT(2) | BIT(3))
 #define   RTMDIO_839X_CMD_MASK			GENMASK(3, 0)
 #define RTMDIO_839X_PHYREG_DATA_CTRL		(0x03F0)
 #define RTMDIO_839X_PHYREG_MMD_CTRL		(0x03F4)
@@ -70,8 +70,8 @@
 #define   RTMDIO_930X_CMD_READ_C22		0
 #define   RTMDIO_930X_CMD_READ_C45		BIT(1)
 #define   RTMDIO_930X_CMD_WRITE_C22		BIT(2)
-#define   RTMDIO_930X_CMD_WRITE_C45		BIT(1) | BIT(2)
-#define   RTMDIO_930X_CMD_MASK			GENMASK(2, 0) | BIT(25)
+#define   RTMDIO_930X_CMD_WRITE_C45		(BIT(1) | BIT(2))
+#define   RTMDIO_930X_CMD_MASK			(GENMASK(2, 0) | BIT(25))
 #define RTMDIO_930X_SMI_ACCESS_PHY_CTRL_2	(0xCB78)
 #define RTMDIO_930X_SMI_ACCESS_PHY_CTRL_3	(0xCB7C)
 #define RTMDIO_930X_SMI_PORT0_15_POLLING_SEL	(0xCA08)
@@ -92,14 +92,14 @@
 #define   RTMDIO_931X_CMD_READ_C22		0
 #define   RTMDIO_931X_CMD_READ_C45		BIT(3)
 #define   RTMDIO_931X_CMD_WRITE_C22		BIT(4)
-#define   RTMDIO_931X_CMD_WRITE_C45		BIT(3) | BIT(4)
+#define   RTMDIO_931X_CMD_WRITE_C45		(BIT(3) | BIT(4))
 #define   RTMDIO_931X_CMD_MASK			GENMASK(4, 0)
 #define RTMDIO_931X_SMI_INDRT_ACCESS_CTRL_1	(0x0C04)
 #define RTMDIO_931X_SMI_INDRT_ACCESS_CTRL_2	(0x0C08)
 #define RTMDIO_931X_SMI_INDRT_ACCESS_CTRL_3	(0x0C10)
 #define RTMDIO_931X_SMI_INDRT_ACCESS_MMD_CTRL	(0x0C18)
 #define RTMDIO_931X_SMI_PHY_ABLTY_GET_SEL	(0x0CAC)
-#define   RTMDIO_931X_SMY_PHY_ABLTY_MDIO	0x0
+#define   RTMDIO_931X_SMI_PHY_ABLTY_MDIO	0x0
 #define   RTMDIO_931X_SMI_PHY_ABLTY_SDS		0x2
 #define RTMDIO_931X_SMI_PORT_POLLING_SEL	(0x0C9C)
 #define RTMDIO_931X_SMI_PORT_ADDR_CTRL		(0x0C74)
@@ -739,14 +739,10 @@ static int rtmdio_839x_setup_ctrl(struct rtmdio_ctrl *ctrl)
 
 static int rtmdio_930x_setup_ctrl(struct rtmdio_ctrl *ctrl)
 {
-	unsigned int mask, val;
-
 	/* Define C22/C45 bus feature set */
-	for (int smi_bus = 0; smi_bus < RTMDIO_MAX_SMI_BUSSES; smi_bus++) {
-		mask = BIT(16 + smi_bus);
-		val = ctrl->bus[smi_bus].is_c45 ? mask : 0;
-		regmap_update_bits(ctrl->map, RTMDIO_930X_SMI_GLB_CTRL, mask, val);
-	}
+	for (int smi_bus = 0; smi_bus < RTMDIO_MAX_SMI_BUSSES; smi_bus++)
+		regmap_assign_bits(ctrl->map, RTMDIO_930X_SMI_GLB_CTRL,
+				   BIT(16 + smi_bus), ctrl->bus[smi_bus].is_c45);
 
 	return 0;
 }
@@ -770,14 +766,12 @@ static void rtmdio_930x_setup_polling(struct rtmdio_ctrl *ctrl)
 		regmap_update_bits(ctrl->map, RTMDIO_930X_SMI_MAC_TYPE_CTRL, mask, val);
 
 		/* polling via standard or resolution register */
-		mask = BIT(20 + ctrl->port[pn].smi_bus);
-		val = phyinfo.has_res_reg ? mask : 0;
-		regmap_update_bits(ctrl->map, RTMDIO_930X_SMI_GLB_CTRL, mask, val);
+		regmap_assign_bits(ctrl->map, RTMDIO_930X_SMI_GLB_CTRL,
+				   BIT(20 + ctrl->port[pn].smi_bus), phyinfo.has_res_reg);
 
 		/* proprietary Realtek 1G/2.5 lite polling */
-		mask = BIT(pn);
-		val = phyinfo.has_giga_lite ? mask : 0;
-		regmap_update_bits(ctrl->map, RTMDIO_930X_SMI_PRVTE_POLLING_CTRL, mask, val);
+		regmap_assign_bits(ctrl->map, RTMDIO_930X_SMI_PRVTE_POLLING_CTRL,
+				   BIT(pn), phyinfo.has_giga_lite);
 
 		/* special duplex/advertisement polling registers */
 		if (phyinfo.poll_duplex || phyinfo.poll_adv_1000 || phyinfo.poll_lpa_1000) {
@@ -827,27 +821,20 @@ static void rtmdio_931x_setup_polling(struct rtmdio_ctrl *ctrl)
 
 		/* set to "PHY driven" */
 		mask = GENMASK(1, 0) << ((pn % 16) * 2);
-		val = RTMDIO_931X_SMY_PHY_ABLTY_MDIO << (ffs(mask) - 1);
+		val = RTMDIO_931X_SMI_PHY_ABLTY_MDIO << (ffs(mask) - 1);
 		regmap_update_bits(ctrl->map, RTMDIO_931X_SMI_PHY_ABLTY_GET_SEL + (pn / 16) * 4,
 				   mask, val);
-		mask = val = 0;
 
 		/* PRVTE0 polling */
-		mask |= BIT(20 + smi_bus);
-		if (phyinfo.has_res_reg)
-			val |= BIT(20 + smi_bus);
-
+		regmap_assign_bits(ctrl->map, RTMDIO_931X_SMI_GLB_CTRL0,
+				   BIT(20 + smi_bus), phyinfo.has_res_reg);
 		/* PRVTE1 polling */
-		mask |= BIT(24 + smi_bus);
-		if (phyinfo.force_res)
-			val |= BIT(24 + smi_bus);
-
-		regmap_update_bits(ctrl->map, RTMDIO_931X_SMI_GLB_CTRL0, mask, val);
+		regmap_assign_bits(ctrl->map, RTMDIO_931X_SMI_GLB_CTRL0,
+				   BIT(24 + smi_bus), phyinfo.force_res);
 
 		/* polling std. or proprietary format (bit 0 of SMI_SETX_FMT_SEL) */
-		mask = BIT(smi_bus * 2);
-		val = phyinfo.force_res ? mask : 0;
-		regmap_update_bits(ctrl->map, RTMDIO_931X_SMI_GLB_CTRL1, mask, val);
+		regmap_assign_bits(ctrl->map, RTMDIO_931X_SMI_GLB_CTRL1,
+				   BIT(smi_bus * 2), phyinfo.force_res);
 
 		/* special polling registers */
 		if (phyinfo.poll_duplex || phyinfo.poll_adv_1000 || phyinfo.poll_lpa_1000) {
