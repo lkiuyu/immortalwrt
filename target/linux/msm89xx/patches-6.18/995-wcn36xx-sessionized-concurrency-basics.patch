@@ -1,0 +1,61 @@
+--- a/drivers/net/wireless/ath/wcn36xx/main.c
++++ b/drivers/net/wireless/ath/wcn36xx/main.c
+@@ -444,10 +444,14 @@
+ 	list_for_each_entry(tmp, &wcn->vif_list, list) {
+ 		vif = wcn36xx_priv_to_vif(tmp);
+
+-		/* FW handles MC filtering only when connected as STA */
++		/* FW handles MC filtering only when connected as STA.
++		 * Skip all non-STA vifs to avoid cross-session filter updates. */
++		if (NL80211_IFTYPE_STATION != vif->type || !tmp->sta_assoc)
++			continue;
++
+ 		if (*total & FIF_ALLMULTI)
+ 			wcn36xx_smd_set_mc_list(wcn, vif, NULL);
+-		else if (NL80211_IFTYPE_STATION == vif->type && tmp->sta_assoc)
++		else
+ 			wcn36xx_smd_set_mc_list(wcn, vif, fp);
+ 	}
+
+--- a/drivers/net/wireless/ath/wcn36xx/smd.c
++++ b/drivers/net/wireless/ath/wcn36xx/smd.c
+@@ -2918,6 +2918,9 @@ int wcn36xx_smd_set_mc_list(struct wcn36xx *wcn,
+ 	struct wcn36xx_hal_rcv_flt_pkt_set_mc_list_req_msg *msg_body = NULL;
+ 	int ret;
+
++	if (vif_priv->bss_index == WCN36XX_HAL_BSS_INVALID_IDX)
++		return 0;
++
+ 	mutex_lock(&wcn->hal_mutex);
+
+ 	msg_body = (struct wcn36xx_hal_rcv_flt_pkt_set_mc_list_req_msg *)
+@@ -3158,6 +3161,20 @@ int wcn36xx_smd_gtk_offload_get_info(struct wcn36xx *wcn,
+ 	return ret;
+ }
+
++static u32 wcn36xx_count_active_sessions(struct wcn36xx *wcn)
++{
++	struct wcn36xx_vif *tmp;
++	u32 count = 0;
++
++	list_for_each_entry(tmp, &wcn->vif_list, list) {
++		if (tmp->bss_index != WCN36XX_HAL_BSS_INVALID_IDX ||
++		    tmp->self_sta_index != WCN36XX_HAL_STA_INVALID_IDX)
++			count++;
++	}
++
++	return count ? count : 1;
++}
++
+ int wcn36xx_smd_wlan_host_suspend_ind(struct wcn36xx *wcn)
+ {
+ 	struct wcn36xx_hal_wlan_host_suspend_ind_msg msg_body;
+@@ -3167,7 +3184,7 @@ int wcn36xx_smd_wlan_host_suspend_ind(struct wcn36xx *wcn)
+
+ 	INIT_HAL_MSG(msg_body, WCN36XX_HAL_HOST_SUSPEND_IND);
+ 	msg_body.configured_mcst_bcst_filter_setting = 0;
+-	msg_body.active_session_count = 1;
++	msg_body.active_session_count = wcn36xx_count_active_sessions(wcn);
+ 	PREPARE_HAL_BUF(wcn->hal_buf, msg_body);
+
+ 	ret = rpmsg_send(wcn->smd_channel, wcn->hal_buf, msg_body.header.len);
