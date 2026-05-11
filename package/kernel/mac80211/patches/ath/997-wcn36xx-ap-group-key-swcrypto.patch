@@ -1,0 +1,24 @@
+--- a/drivers/net/wireless/ath/wcn36xx/main.c
++++ b/drivers/net/wireless/ath/wcn36xx/main.c
+@@ -573,6 +573,11 @@
+ 				key,
+ 				get_sta_index(vif, sta_priv));
+ 		} else {
++			if (vif->type == NL80211_IFTYPE_AP) {
++				ret = -EOPNOTSUPP;
++				goto out;
++			}
++
+ 			wcn36xx_smd_set_bsskey(wcn,
+ 				vif_priv->encrypt_type,
+ 				vif_priv->bss_index,
+@@ -597,6 +602,9 @@
+ 		break;
+ 	case DISABLE_KEY:
+ 		if (!(IEEE80211_KEY_FLAG_PAIRWISE & key_conf->flags)) {
++			if (vif->type == NL80211_IFTYPE_AP)
++				goto out;
++
+ 			if (vif_priv->bss_index != WCN36XX_HAL_BSS_INVALID_IDX)
+ 				wcn36xx_smd_remove_bsskey(wcn,
+ 					vif_priv->encrypt_type,

@@ -1,0 +1,43 @@
+--- a/drivers/net/wireless/ath/wcn36xx/main.c
++++ b/drivers/net/wireless/ath/wcn36xx/main.c
+@@ -185,6 +185,26 @@ static const struct wiphy_wowlan_support wowlan_support = {
+ #endif
+
++static const struct ieee80211_iface_limit wcn36xx_iface_limits[] = {
++	{
++		.max = 1,
++		.types = BIT(NL80211_IFTYPE_STATION),
++	},
++	{
++		.max = 1,
++		.types = BIT(NL80211_IFTYPE_AP),
++	},
++};
++
++static const struct ieee80211_iface_combination wcn36xx_iface_combinations[] = {
++	{
++		.limits = wcn36xx_iface_limits,
++		.n_limits = ARRAY_SIZE(wcn36xx_iface_limits),
++		.max_interfaces = 2,
++		.num_different_channels = 1,
++	},
++};
++
+ static inline u8 get_sta_index(struct ieee80211_vif *vif,
+ 			       struct wcn36xx_sta *sta_priv)
+ {
+ 	return NL80211_IFTYPE_STATION == vif->type ?
+@@ -1435,8 +1455,13 @@ static int wcn36xx_init_ieee80211(struct wcn36xx *wcn)
+ 	wcn->hw->wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION) |
+ 		BIT(NL80211_IFTYPE_AP) |
+ 		BIT(NL80211_IFTYPE_ADHOC) |
+ 		BIT(NL80211_IFTYPE_MESH_POINT);
+
++	wcn->hw->wiphy->iface_combinations = wcn36xx_iface_combinations;
++	wcn->hw->wiphy->n_iface_combinations =
++		ARRAY_SIZE(wcn36xx_iface_combinations);
++	wcn36xx_info("advertising same-channel STA+AP interface combinations\n");
++
+ 	wcn->hw->wiphy->bands[NL80211_BAND_2GHZ] = &wcn_band_2ghz;
+ 	if (wcn->rf_id != RF_IRIS_WCN3620)
+ 		wcn->hw->wiphy->bands[NL80211_BAND_5GHZ] = &wcn_band_5ghz;
